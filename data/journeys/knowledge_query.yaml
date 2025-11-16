@@ -1,0 +1,169 @@
+name: knowledge_query
+description: >
+  Customer has general questions about insurance policies, coverage, procedures,
+  or company information. This journey provides accurate information from the
+  knowledge base without requiring specific claim or account actions.
+
+activation_conditions: >
+  User asks general questions about:
+  - Policy coverage ("What does my policy cover?")
+  - Procedures ("How do I add a driver?", "How do I update my address?")
+  - Coverage limits and deductibles
+  - Company policies and procedures
+  - Insurance terminology
+  - Any general information query that doesn't involve a specific claim
+
+initial_state: greeting
+
+states:
+  greeting:
+    name: greeting
+    action: >
+      Greet the customer and ask how you can help them today.
+      Confirm they have a general question about policies, coverage, or procedures.
+    tools: []
+    metadata:
+      expected_duration_seconds: 10
+      user_friendly_name: Initial Greeting
+
+  understand_question:
+    name: understand_question
+    action: >
+      Listen carefully to the customer's question. Ask clarifying questions if needed
+      to fully understand what information they're seeking. Identify key topics:
+      coverage type, policy details, procedures, or general information.
+    tools: []
+    metadata:
+      expected_duration_seconds: 20
+      user_friendly_name: Question Understanding
+
+  search_knowledge_base:
+    name: search_knowledge_base
+    action: >
+      Use search_knowledge_base tool to find relevant articles, policies, and
+      information that answers the customer's question. Search with keywords
+      extracted from their query.
+    tools:
+      - search_knowledge_base
+    metadata:
+      expected_duration_seconds: 15
+      user_friendly_name: Knowledge Search
+
+  provide_answer:
+    name: provide_answer
+    action: >
+      Present the information in a clear, customer-friendly way. Avoid insurance
+      jargon when possible, or explain terms when necessary. If the answer involves
+      multiple points, organize them logically. Cite specific policy sections if
+      relevant.
+    tools:
+      - search_knowledge_base
+    metadata:
+      expected_duration_seconds: 40
+      user_friendly_name: Answer Delivery
+
+  verify_understanding:
+    name: verify_understanding
+    action: >
+      Check if the customer understands the information provided. Ask if they
+      need any clarification or have follow-up questions. Offer to rephrase or
+      provide examples if needed.
+    tools: []
+    metadata:
+      expected_duration_seconds: 15
+      user_friendly_name: Understanding Check
+
+  handle_followup:
+    name: handle_followup
+    action: >
+      Address any follow-up questions. Search the knowledge base again if needed.
+      If the question requires account-specific information or actions, offer to
+      verify their identity and help with that specific task.
+    tools:
+      - search_knowledge_base
+    metadata:
+      expected_duration_seconds: 30
+      user_friendly_name: Follow-up Questions
+
+  offer_additional_help:
+    name: offer_additional_help
+    action: >
+      Ask if there's anything else you can help with today. If they need to file
+      a claim or check claim status, indicate you can help with that. If they need
+      account changes, explain the process or offer to transfer to appropriate department.
+    tools: []
+    metadata:
+      expected_duration_seconds: 20
+      user_friendly_name: Additional Assistance
+
+  completion:
+    name: completion
+    action: >
+      Summarize the key information provided, thank the customer for calling,
+      and end the call professionally. Offer them the option to call back anytime
+      with more questions.
+    tools: []
+    metadata:
+      expected_duration_seconds: 15
+      user_friendly_name: Call Completion
+
+transitions:
+  - from_state: greeting
+    to_state: understand_question
+    condition: Customer confirms they have a question
+    priority: 100
+
+  - from_state: greeting
+    to_state: completion
+    condition: Customer indicates they called by mistake or wrong number
+    priority: 50
+
+  - from_state: understand_question
+    to_state: search_knowledge_base
+    condition: Question is clear and ready to search
+    priority: 100
+
+  - from_state: search_knowledge_base
+    to_state: provide_answer
+    condition: Relevant information found in knowledge base
+    priority: 100
+
+  - from_state: search_knowledge_base
+    to_state: understand_question
+    condition: No results found, need to rephrase or clarify question
+    priority: 80
+
+  - from_state: provide_answer
+    to_state: verify_understanding
+    condition: Information has been presented to customer
+    priority: 100
+
+  - from_state: verify_understanding
+    to_state: handle_followup
+    condition: Customer has follow-up questions
+    priority: 100
+
+  - from_state: verify_understanding
+    to_state: offer_additional_help
+    condition: Customer understands and has no follow-ups on this topic
+    priority: 90
+
+  - from_state: handle_followup
+    to_state: search_knowledge_base
+    condition: Follow-up question requires new knowledge base search
+    priority: 100
+
+  - from_state: handle_followup
+    to_state: verify_understanding
+    condition: Follow-up answered, check understanding again
+    priority: 90
+
+  - from_state: offer_additional_help
+    to_state: understand_question
+    condition: Customer has another general question
+    priority: 100
+
+  - from_state: offer_additional_help
+    to_state: completion
+    condition: Customer is satisfied and ready to end call
+    priority: 100
