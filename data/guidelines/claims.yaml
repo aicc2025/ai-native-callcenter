@@ -1,0 +1,177 @@
+# Claims Journey Guidelines
+# These apply specifically to claim-related journeys
+
+guidelines:
+  # Claim Inquiry Journey Guidelines
+  - name: verify_before_claim_details
+    scope: JOURNEY
+    journey_name: claim_inquiry
+    description: >
+      Identity must be verified before providing any claim details.
+    condition: >
+      User asks for claim information before identity verification
+    action: >
+      Politely explain that for security, you need to verify their identity
+      before discussing claim details. Guide them to the verification step.
+    keywords:
+      - claim status
+      - claim details
+      - my claim
+      - claim number
+      - claim information
+    priority: 100
+    enabled: true
+
+  - name: accurate_status_explanation
+    scope: JOURNEY
+    journey_name: claim_inquiry
+    description: >
+      Claim status must be explained clearly and accurately based on actual
+      system data, not assumptions.
+    condition: >
+      When providing claim status information
+    action: >
+      Use get_claim_status tool to retrieve current status. Explain the status
+      in simple terms. If status is "pending", explain what the claim is waiting
+      for. If "approved" or "denied", explain next steps. Never guess at status.
+    keywords:
+      - status
+      - approved
+      - denied
+      - pending
+      - processing
+    priority: 90
+    enabled: true
+
+  # Claim Submission Journey Guidelines
+  - name: collect_required_fields
+    scope: JOURNEY
+    journey_name: claim_submission
+    description: >
+      All required fields must be collected before submitting a claim.
+    condition: >
+      When preparing to submit a claim
+    action: >
+      Ensure you have collected: claim type, incident date, incident location,
+      incident description, and estimated amount. Review all fields with the
+      customer before submission. Do not submit incomplete claims.
+    keywords:
+      - submit
+      - file claim
+      - create claim
+      - ready to submit
+    priority: 100
+    enabled: true
+
+  - name: empathy_for_incidents
+    scope: JOURNEY
+    journey_name: claim_submission
+    description: >
+      Show empathy when customers are filing claims due to accidents,
+      losses, or difficult situations.
+    condition: >
+      Throughout claim submission journey, especially when hearing about
+      the incident
+    action: >
+      Express genuine empathy for their situation. Use phrases like "I'm sorry
+      to hear about that" or "That must have been difficult". Balance empathy
+      with professionalism and efficiency in helping them file the claim.
+    keywords:
+      - accident
+      - incident
+      - damage
+      - loss
+      - injury
+      - stolen
+      - fire
+      - flood
+    priority: 80
+    enabled: true
+
+  - name: documentation_guidance
+    scope: JOURNEY
+    journey_name: claim_submission
+    description: >
+      Provide clear guidance on required documentation for claim processing.
+    condition: >
+      When discussing supporting documentation
+    action: >
+      Clearly list what documentation would help their claim: photos, police
+      reports, medical records, repair estimates, witness statements, etc.
+      Explain how to submit documents. Be specific about deadlines if any.
+      Use search_knowledge_base for claim-type-specific requirements.
+    keywords:
+      - documents
+      - documentation
+      - photos
+      - pictures
+      - proof
+      - evidence
+      - police report
+      - medical records
+    priority: 85
+    enabled: true
+
+  - name: set_realistic_expectations
+    scope: JOURNEY
+    journey_name: claim_submission
+    description: >
+      Set realistic expectations for claim processing timelines and outcomes.
+    condition: >
+      When discussing timelines or approval likelihood
+    action: >
+      Provide accurate timeline information from knowledge base. Explain that
+      initial amounts are estimates and may change during review. Do not
+      guarantee approval or specific amounts. Be honest about processing time.
+    keywords:
+      - how long
+      - when
+      - timeline
+      - will it be approved
+      - guaranteed
+      - promise
+    priority: 90
+    enabled: true
+
+  # State-Specific Guidelines
+  - name: max_verification_attempts
+    scope: STATE
+    journey_name: claim_inquiry
+    state_name: verify_identity
+    description: >
+      Limit identity verification attempts to prevent fraud and protect accounts.
+    condition: >
+      Customer fails identity verification
+    action: >
+      Allow maximum 3 verification attempts. After 3 failures, politely explain
+      that for security reasons, they need to contact customer service with
+      additional identification. Do not continue to the next state without
+      successful verification.
+    keywords:
+      - verify
+      - failed
+      - incorrect
+      - wrong
+    priority: 100
+    enabled: true
+
+  - name: offer_claim_number_lookup
+    scope: STATE
+    journey_name: claim_inquiry
+    state_name: get_claim_reference
+    description: >
+      Proactively offer to look up claim number if customer doesn't have it.
+    condition: >
+      Customer doesn't know their claim number
+    action: >
+      Don't make them feel bad about not having the number. Offer to look it
+      up using their customer information with list_customer_claims tool.
+      If multiple claims exist, help them identify the right one by date or type.
+    keywords:
+      - don't know
+      - forgot
+      - don't have
+      - lost
+      - can't find
+    priority: 80
+    enabled: true

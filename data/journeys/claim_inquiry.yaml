@@ -1,0 +1,150 @@
+name: claim_inquiry
+description: >
+  Customer inquires about an existing claim's status, details, or next steps.
+  This journey helps customers track their claims, understand claim statuses,
+  and get information about pending actions or documentation requirements.
+
+activation_conditions: >
+  User wants to check on an existing claim, asking questions like:
+  - "What's the status of my claim?"
+  - "When will my claim be processed?"
+  - "I filed a claim last week, can you check on it?"
+  - "Is there an update on claim #12345?"
+  - Any inquiry about claim status, timeline, or details
+
+initial_state: greeting
+
+states:
+  greeting:
+    name: greeting
+    action: >
+      Greet the customer warmly and confirm they want to inquire about a claim.
+      Ask them to verify their identity before proceeding.
+    tools: []
+    metadata:
+      expected_duration_seconds: 10
+      user_friendly_name: Initial Greeting
+
+  verify_identity:
+    name: verify_identity
+    action: >
+      Verify the customer's identity by asking for their phone number, date of birth,
+      or last 4 digits of SSN. Use the verify_customer_identity tool to confirm.
+      This is a critical security step - do not skip it.
+    tools:
+      - verify_customer_identity
+    metadata:
+      expected_duration_seconds: 20
+      user_friendly_name: Identity Verification
+      max_attempts: 3
+
+  get_claim_reference:
+    name: get_claim_reference
+    action: >
+      Ask the customer for their claim number or reference. If they don't have it,
+      offer to look it up using their customer information. Use list_customer_claims
+      to find claims associated with their account.
+    tools:
+      - list_customer_claims
+    metadata:
+      expected_duration_seconds: 15
+      user_friendly_name: Claim Reference Lookup
+
+  retrieve_claim_status:
+    name: retrieve_claim_status
+    action: >
+      Use get_claim_status tool to retrieve the full claim details including status,
+      amount, type, dates, and any pending actions. Present this information clearly
+      to the customer.
+    tools:
+      - get_claim_status
+    metadata:
+      expected_duration_seconds: 10
+      user_friendly_name: Status Retrieval
+
+  provide_status_details:
+    name: provide_status_details
+    action: >
+      Explain the claim status in simple terms. If pending, explain why and what
+      happens next. If approved/denied, explain the decision and next steps.
+      If documentation is needed, clearly list what is required and how to submit it.
+    tools:
+      - search_knowledge_base
+    metadata:
+      expected_duration_seconds: 30
+      user_friendly_name: Status Explanation
+
+  answer_followup_questions:
+    name: answer_followup_questions
+    action: >
+      Address any additional questions about the claim, timeline, documentation,
+      or process. Use search_knowledge_base for policy-related questions.
+      Offer to escalate to a human agent if needed.
+    tools:
+      - search_knowledge_base
+      - get_claim_status
+    metadata:
+      expected_duration_seconds: 30
+      user_friendly_name: Follow-up Questions
+
+  completion:
+    name: completion
+    action: >
+      Summarize what was discussed, confirm the customer has no more questions,
+      and thank them for calling. Provide claim reference number and estimated
+      next update timeline if applicable.
+    tools: []
+    metadata:
+      expected_duration_seconds: 15
+      user_friendly_name: Call Completion
+
+transitions:
+  - from_state: greeting
+    to_state: verify_identity
+    condition: Customer confirms they want to check on a claim
+    priority: 100
+
+  - from_state: verify_identity
+    to_state: get_claim_reference
+    condition: Identity verification successful
+    priority: 100
+
+  - from_state: verify_identity
+    to_state: completion
+    condition: Identity verification failed after max attempts
+    priority: 90
+
+  - from_state: get_claim_reference
+    to_state: retrieve_claim_status
+    condition: Claim number or reference obtained
+    priority: 100
+
+  - from_state: retrieve_claim_status
+    to_state: provide_status_details
+    condition: Claim found and retrieved successfully
+    priority: 100
+
+  - from_state: retrieve_claim_status
+    to_state: get_claim_reference
+    condition: Claim not found, need to try different reference
+    priority: 90
+
+  - from_state: provide_status_details
+    to_state: answer_followup_questions
+    condition: Customer has additional questions
+    priority: 100
+
+  - from_state: provide_status_details
+    to_state: completion
+    condition: Customer satisfied with status information
+    priority: 90
+
+  - from_state: answer_followup_questions
+    to_state: completion
+    condition: All questions answered, customer ready to end call
+    priority: 100
+
+  - from_state: answer_followup_questions
+    to_state: retrieve_claim_status
+    condition: Customer wants to check another claim
+    priority: 80

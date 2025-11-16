@@ -1,0 +1,222 @@
+name: claim_submission
+description: >
+  Customer wants to file a new insurance claim. This journey guides them through
+  the complete claim submission process, collecting all necessary information,
+  validating data, and creating the claim record in the system.
+
+activation_conditions: >
+  User wants to file a new claim, using phrases like:
+  - "I need to file a claim"
+  - "I want to submit a claim"
+  - "I had an accident/incident and need to report it"
+  - "How do I make a claim?"
+  - Any request to create or submit a new claim
+
+initial_state: greeting
+
+states:
+  greeting:
+    name: greeting
+    action: >
+      Greet the customer warmly and confirm they want to file a new claim.
+      Express empathy for their situation and assure them you'll help them
+      through the process. Ask them to verify their identity first.
+    tools: []
+    metadata:
+      expected_duration_seconds: 15
+      user_friendly_name: Initial Greeting
+
+  verify_identity:
+    name: verify_identity
+    action: >
+      Verify the customer's identity by asking for their phone number, date of birth,
+      or last 4 digits of SSN. Use verify_customer_identity tool to confirm.
+      This ensures the claim is filed under the correct account.
+    tools:
+      - verify_customer_identity
+    metadata:
+      expected_duration_seconds: 20
+      user_friendly_name: Identity Verification
+      max_attempts: 3
+
+  collect_claim_type:
+    name: collect_claim_type
+    action: >
+      Ask what type of claim they're filing: auto, home, health, life, or other.
+      Explain briefly what information will be needed based on the claim type.
+      Store the claim type in context variables.
+    tools:
+      - search_knowledge_base
+    metadata:
+      expected_duration_seconds: 20
+      user_friendly_name: Claim Type Selection
+      valid_types:
+        - auto
+        - home
+        - health
+        - life
+        - other
+
+  collect_incident_details:
+    name: collect_incident_details
+    action: >
+      Collect key details about the incident:
+      - Date and time of incident
+      - Location (address or coordinates)
+      - Brief description of what happened
+      - Any injuries or damages
+      - Police report number (if applicable)
+      Ask follow-up questions to get a complete picture.
+    tools: []
+    metadata:
+      expected_duration_seconds: 60
+      user_friendly_name: Incident Details
+      required_fields:
+        - incident_date
+        - incident_location
+        - incident_description
+
+  collect_claim_amount:
+    name: collect_claim_amount
+    action: >
+      Ask for the estimated claim amount or damage cost. If customer is unsure,
+      help them estimate based on incident type. Explain that this is preliminary
+      and will be adjusted during claims processing.
+    tools:
+      - search_knowledge_base
+    metadata:
+      expected_duration_seconds: 30
+      user_friendly_name: Amount Estimation
+
+  collect_supporting_info:
+    name: collect_supporting_info
+    action: >
+      Ask about supporting documentation they have or will provide:
+      - Photos of damage
+      - Police reports
+      - Witness information
+      - Medical records (if applicable)
+      - Repair estimates
+      Explain how to submit these documents later if not immediately available.
+    tools:
+      - search_knowledge_base
+    metadata:
+      expected_duration_seconds: 45
+      user_friendly_name: Supporting Documentation
+
+  review_and_confirm:
+    name: review_and_confirm
+    action: >
+      Review all collected information with the customer:
+      - Claim type
+      - Incident date, location, and description
+      - Estimated amount
+      - Supporting documentation status
+      Ask if anything needs to be corrected before submission.
+    tools: []
+    metadata:
+      expected_duration_seconds: 30
+      user_friendly_name: Information Review
+
+  submit_claim:
+    name: submit_claim
+    action: >
+      Use submit_claim tool to create the claim record in the system.
+      Capture the claim ID and confirmation details.
+    tools:
+      - submit_claim
+    metadata:
+      expected_duration_seconds: 10
+      user_friendly_name: Claim Submission
+
+  provide_confirmation:
+    name: provide_confirmation
+    action: >
+      Provide the customer with:
+      - Claim reference number
+      - Expected processing timeline
+      - Next steps in the claims process
+      - How to check status or submit additional documents
+      - Contact information for follow-up
+      Thank them and express empathy for their situation.
+    tools:
+      - search_knowledge_base
+    metadata:
+      expected_duration_seconds: 30
+      user_friendly_name: Confirmation and Next Steps
+
+  completion:
+    name: completion
+    action: >
+      Final confirmation that customer has all information they need.
+      Wish them well and end the call professionally.
+    tools: []
+    metadata:
+      expected_duration_seconds: 10
+      user_friendly_name: Call Completion
+
+transitions:
+  - from_state: greeting
+    to_state: verify_identity
+    condition: Customer confirms they want to file a claim
+    priority: 100
+
+  - from_state: verify_identity
+    to_state: collect_claim_type
+    condition: Identity verification successful
+    priority: 100
+
+  - from_state: verify_identity
+    to_state: completion
+    condition: Identity verification failed after max attempts
+    priority: 90
+
+  - from_state: collect_claim_type
+    to_state: collect_incident_details
+    condition: Valid claim type selected and stored
+    priority: 100
+
+  - from_state: collect_incident_details
+    to_state: collect_claim_amount
+    condition: All required incident details collected
+    priority: 100
+
+  - from_state: collect_claim_amount
+    to_state: collect_supporting_info
+    condition: Claim amount captured (or marked as TBD)
+    priority: 100
+
+  - from_state: collect_supporting_info
+    to_state: review_and_confirm
+    condition: Supporting documentation discussed
+    priority: 100
+
+  - from_state: review_and_confirm
+    to_state: collect_incident_details
+    condition: Customer wants to correct incident details
+    priority: 90
+
+  - from_state: review_and_confirm
+    to_state: collect_claim_amount
+    condition: Customer wants to correct claim amount
+    priority: 85
+
+  - from_state: review_and_confirm
+    to_state: submit_claim
+    condition: Customer confirms all information is correct
+    priority: 100
+
+  - from_state: submit_claim
+    to_state: provide_confirmation
+    condition: Claim submitted successfully
+    priority: 100
+
+  - from_state: submit_claim
+    to_state: review_and_confirm
+    condition: Claim submission failed, need to review data
+    priority: 80
+
+  - from_state: provide_confirmation
+    to_state: completion
+    condition: Customer acknowledges confirmation details
+    priority: 100
