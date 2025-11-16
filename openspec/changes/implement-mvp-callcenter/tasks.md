@@ -98,31 +98,32 @@
 
 ## Week 5: Journey Definitions & Pipeline Integration
 
-- [ ] Create `data/journeys/claim_inquiry.yaml`: define states and transitions in OpenAI Assistants API format
-- [ ] Create `data/journeys/claim_submission.yaml`
-- [ ] Create `data/journeys/knowledge_query.yaml`
-- [ ] Create `app/flow_control/journey/loader.py`: parse YAML/JSON and validate against schema
-- [ ] Create migration to seed 3 journey definitions from YAML files into database
-- [ ] Create `data/guidelines/compliance.yaml`: global guidelines in structured format
-- [ ] Create `data/guidelines/claims.yaml`: journey-specific guidelines
-- [ ] Create migration to seed 10-15 guidelines from YAML files
-- [ ] Run migrations to load journeys and guidelines
-- [ ] Implement `app/pipeline/processors/journey_processor.py`:
+- [x] Create `data/journeys/claim_inquiry.yaml`: define states and transitions in OpenAI Assistants API format
+- [x] Create `data/journeys/claim_submission.yaml`
+- [x] Create `data/journeys/knowledge_query.yaml`
+- [x] Create `app/flow_control/journey/loader.py`: parse YAML/JSON and validate against schema
+- [x] Create `app/flow_control/guideline/loader.py`: parse guideline YAML files
+- [x] Create migration to seed 3 journey definitions from YAML files into database (migration 004)
+- [x] Create `data/guidelines/compliance.yaml`: global guidelines in structured format (8 global guidelines)
+- [x] Create `data/guidelines/claims.yaml`: journey-specific guidelines
+- [x] Create migration to seed guidelines from YAML files (migration 005)
+- [x] Implement `app/pipeline/processors/journey_processor.py`:
   - Override process_frame() to intercept LLMMessagesFrame
   - Get/activate journey context
   - Match guidelines
   - Build enhanced system prompt
   - Inject into frame
-- [ ] Implement `app/pipeline/processors/validator_processor.py`:
+- [x] Implement `app/pipeline/processors/validator_processor.py`:
   - Intercept TextFrame (LLM response)
   - Validate against guidelines
   - Auto-fix if needed
   - Log to validation_audit
-- [ ] Wire processors into pipeline factory
-- [ ] Create `app/main.py`: FastAPI app, SIP server init, pipeline routing, /metrics endpoint
+- [x] Wire processors into pipeline factory (journey_processor and validator_processor integrated)
+- [x] Update `app/main.py`: FastAPI app, SIP server init, pipeline routing, /metrics endpoint (already existed, now integrated)
+- [ ] Run migrations to load journeys and guidelines (migrations exist, need to execute)
 - [ ] Test end-to-end with Zoiper: activate journey, execute tools, complete flow
 
-**Validation**: 3 journeys work end-to-end, guidelines enforced, validation logged
+**Validation**: Code complete ✓, migrations ready ✓, end-to-end testing pending
 
 ---
 
