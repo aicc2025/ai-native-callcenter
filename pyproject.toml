@@ -1,0 +1,48 @@
+[project]
+name = "ai-native-callcenter"
+version = "0.1.0"
+description = "AI-native call center for insurance claims and customer service"
+requires-python = ">=3.12"
+dependencies = [
+    "pipecat-ai>=0.0.94",
+    "asyncpg>=0.29.0",
+    "redis>=5.0.0",
+    "minio>=7.2.0",
+    "uuid7>=0.1.0",
+    "structlog>=24.1.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "alembic>=1.13.0",
+    "pyyaml>=6.0.1",
+    "openai>=1.12.0",
+    "deepgram-sdk>=3.2.0",
+    "python-dotenv>=1.0.0",
+    "prometheus-client>=0.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.1.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
