@@ -70,8 +70,9 @@ carries the one-line installer's files.
   or Colima's port forwarding arrived from the compose gateway's private
   address, was taken to be local, and was told to send its audio to the
   container's address. The external profile, which carries the `aicc_bot`
-  gateway, is unchanged. Verified on Docker Desktop on an Intel Mac; not
-  re-verified on a Linux host.
+  gateway, is unchanged. Two-way audio verified live on Docker Desktop on an
+  Intel Mac, on Colima with the `grpc` port forwarder (macOS overlay) and on
+  a Linux host with the host-network overlay and a LAN WebRTC agent.
 
 ### Fixed
 
