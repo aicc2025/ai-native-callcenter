@@ -149,7 +149,7 @@ services:
     volumes:
       - ./postgres/lua-role.sh:/lua-role.sh:ro
       - ./sql/lua_role.sql:/lua_role.sql:ro
-    entrypoint: ["/bin/bash", "/lua-role.sh"]
+    entrypoint: ["/bin/sh", "/lua-role.sh"]
 
   freeswitch:
     # This repository's own switch image: FreeSWITCH v1.11.3 from source, the
