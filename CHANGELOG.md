@@ -2,7 +2,53 @@
 
 Changes to each release of the AI-native call center. A release is two images
 under one tag, `rasonyang/ai-native-callcenter` and `rasonyang/freeswitch-aicc`;
-run them together.
+run them together. From the next release on, the GitHub release of the same
+tag also carries the one-line installer's files.
+
+## Unreleased
+
+### Upgrade notes
+
+- The demo seed no longer resets existing accounts: an account or extension
+  that already exists keeps its password and role on every boot.
+- `AICC_SEED_PASSWORD` must not contain `& < > " '`, whitespace or control
+  characters; the application refuses to start with one, because the switch
+  writes the value into XML.
+
+### Added
+
+- A one-line installer, `deploy/install.sh`:
+  `curl -fsSL https://github.com/rasonyang/ai-native-callcenter/releases/latest/download/install.sh | sudo sh`
+  on Linux (into `/opt/aicc`), without `sudo` on macOS (into `~/.aicc`). It
+  runs preflight checks that fail with a stable `PREFLIGHT_*` tag and a fix
+  before anything is written, verifies the deploy bundle's checksum, writes
+  `.env` (mode 0600) with generated secrets, starts the published images and
+  runs `aicc doctor`. Reruns repair without regenerating secrets;
+  `--external-ip`, `--upgrade` (with a `pg_dump` backup first),
+  `--uninstall`, `--purge`, `--check` and `--no-demo` cover the rest.
+- Release assets: `install.sh`, `aicc-deploy-<tag>.tar.gz` and
+  `checksums.txt` on the GitHub release, built by `scripts/release-bundle.sh`.
+- Compose overlays: `deploy/compose.linux.yml` runs the application and the
+  switch on the host network; `deploy/compose.macos.yml` runs them in one
+  shared network namespace. `deploy/compose.release.yml.in` is the release
+  overlay that pins the published images.
+- `aicc doctor` checks a running deployment from inside it and changes
+  nothing: readiness, the switch link, the database and its migrations, the
+  event socket, the SIP profiles, the bot gateway, the external address and
+  the provider. Each failure carries a stable code and a fix.
+- `AICC_SEED_PASSWORD`: the password the demo seed gives the accounts and
+  extensions it creates, and the simulated customers' SIP password.
+- `AICC_BOT_ALLOWED_PEERS`: the addresses allowed to send SIP to the bot and
+  RTP/RTCP to its calls; anything else is dropped before it is parsed. Empty
+  (the default) allows every peer, as before; the Linux overlay sets it.
+- `/readyz` reports the database, the switch link and the migration version
+  in stable body lines.
+
+### Fixed
+
+- `lua-role` could exit with "tuple concurrently deleted" on a fresh start,
+  when its grants raced a migration replacing a `luacc` view. It now waits
+  for the migrations to finish and checks every grant.
 
 ## v0.1.1 - 2026-09-24
 
