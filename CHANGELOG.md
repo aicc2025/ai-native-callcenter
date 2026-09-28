@@ -2,10 +2,10 @@
 
 Changes to each release of the AI-native call center. A release is two images
 under one tag, `rasonyang/ai-native-callcenter` and `rasonyang/freeswitch-aicc`;
-run them together. From the next release on, the GitHub release of the same
-tag also carries the one-line installer's files.
+run them together. From v0.2.0 on, the GitHub release of the same tag also
+carries the one-line installer's files.
 
-## Unreleased
+## v0.2.0 - 2026-09-28
 
 ### Upgrade notes
 
