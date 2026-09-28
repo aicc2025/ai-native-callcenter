@@ -14,6 +14,20 @@ carries the one-line installer's files.
 - `AICC_SEED_PASSWORD` must not contain `& < > " '`, whitespace or control
   characters; the application refuses to start with one, because the switch
   writes the value into XML.
+- Upgrade both images together. The v0.2.0 switch image changes the internal
+  SIP profile's NAT handling (see Changed): every phone that is not on
+  loopback is answered with `FS_EXTERNAL_IP` in the SDP, including phones on
+  the switch's own LAN. On a Linux host, check that `FS_EXTERNAL_IP` is an
+  address LAN phones can send RTP to.
+- The macOS installer needs the v0.2.0 switch image or later. Do not pair it
+  with the v0.1.1 switch image (`AICC_FS_IMAGE=rasonyang/freeswitch-aicc:v0.1.1`):
+  that image answers phones behind Docker Desktop's or Colima's port
+  forwarding with the container's address, and the calls have no audio.
+- qwen: the default model is now `qwen-audio-3.1-realtime-plus` and the
+  profile's fallback voice `longanqian_v3.1`. A deployment that sets
+  `AICC_PROVIDER_MODEL` keeps its model. There is no 3.1 flash model. Live
+  transcription still uses `qwen-audio-3.0-asr-flash-streaming`.
+- Building from source needs Go 1.27.1 or later.
 
 ### Added
 
@@ -43,12 +57,40 @@ carries the one-line installer's files.
   (the default) allows every peer, as before; the Linux overlay sets it.
 - `/readyz` reports the database, the switch link and the migration version
   in stable body lines.
+- The agent's My calls list shows the whole call's duration in a Total
+  column beside the agent's talk time, which is now labelled "Agent talk".
+
+### Changed
+
+- The switch's internal SIP profile treats only loopback as its local
+  network (`local-network-acl` `aicc_sip_local`, with
+  `aggressive-nat-detection` on) and answers every other phone with
+  `FS_EXTERNAL_IP`, letting RTP auto-adjust follow the address the audio
+  arrives from. Before, a phone reaching the switch through Docker Desktop's
+  or Colima's port forwarding arrived from the compose gateway's private
+  address, was taken to be local, and was told to send its audio to the
+  container's address. The external profile, which carries the `aicc_bot`
+  gateway, is unchanged. Verified on Docker Desktop on an Intel Mac; not
+  re-verified on a Linux host.
 
 ### Fixed
 
 - `lua-role` could exit with "tuple concurrently deleted" on a fresh start,
   when its grants raced a migration replacing a `luacc` view. It now waits
   for the migrations to finish and checks every grant.
+- Gemini: the local speech detector no longer drops a caller's speech start
+  or stop while the bot's audio is being relayed, so the dead-air timer is
+  cancelled when the caller talks over the bot.
+
+### Docs and CI
+
+- `deploy/README.md`: the git checkout names the release tag, and the guide
+  covers the prerequisites, where provider keys must be set, first-start
+  switch messages, a no-phone test call, the bot gateway's NOREG state,
+  transcription settings and upgrading. A section covers running the stack
+  on macOS, with troubleshooting for one-way and no audio.
+- CI skips Markdown-only changes and builds container images only at
+  release. Redundant tests were removed and the test harness consolidated.
 
 ## v0.1.1 - 2026-09-24
 
