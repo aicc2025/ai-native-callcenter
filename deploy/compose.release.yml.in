@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Release overlay template. The release pipeline replaces @TAG@ with the
+# release tag and ships the result as compose.release.yml, so a deployment
+# runs the published images and builds nothing:
+#
+#   docker compose -f docker-compose.yml -f compose.release.yml \
+#       [-f compose.linux.yml | -f compose.macos.yml] up -d
+
+services:
+  aicc:
+    image: ${AICC_IMAGE:-rasonyang/ai-native-callcenter:@TAG@}
+    build: !reset null
+    pull_policy: missing
+
+  freeswitch:
+    image: ${AICC_FS_IMAGE:-rasonyang/freeswitch-aicc:@TAG@}

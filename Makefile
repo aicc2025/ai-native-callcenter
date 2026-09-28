@@ -24,6 +24,20 @@ STACK := deploy/docker-compose.yml
 stack-up: ## Start the whole product on this machine, seeded
 	docker compose -f $(STACK) up -d
 
+.PHONY: stack-config
+stack-config: ## Validate the stack's compose files: the base, each overlay, and the stamped release overlay
+	@set -euo pipefail; \
+	export FS_EXTERNAL_IP=192.0.2.10 FS_LOCAL_IP=192.0.2.10; \
+	rel=$$(mktemp -d)/compose.release.yml; \
+	trap 'rm -rf "$$(dirname "$$rel")"' EXIT; \
+	sed 's/@TAG@/v0.0.0/g' deploy/compose.release.yml.in > "$$rel"; \
+	for os in "" deploy/compose.linux.yml deploy/compose.macos.yml; do \
+	  for r in "" "$$rel"; do \
+	    echo "compose config: $(STACK)$${r:+ + release}$${os:+ + $$os}"; \
+	    docker compose -f $(STACK) $${r:+-f "$$r"} $${os:+-f "$$os"} config -q; \
+	  done; \
+	done
+
 .PHONY: stack-down
 stack-down: ## Stop the stack (add ARGS=-v to discard its data)
 	docker compose -f $(STACK) down $(ARGS)

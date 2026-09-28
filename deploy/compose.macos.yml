@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# macOS overlay: the application and the switch share one network namespace.
+#
+#   docker compose -f docker-compose.yml -f compose.macos.yml up -d
+#
+# or COMPOSE_FILE=docker-compose.yml:compose.macos.yml in .env. Needs Compose
+# 2.24.4 or later for !reset.
+#
+# Host networking on macOS attaches to the runtime's VM, not to the Mac, so it
+# does not help here. Instead a placeholder container, netns, owns a namespace
+# on the compose network at the fixed AICC_APP_IP and publishes every port;
+# the application and the switch join it. That keeps the event socket on
+# loopback, and the switch dials the bot at the namespace's own address.
+#
+# Startup order: postgres -> netns -> aicc (migrates) -> lua-role -> freeswitch.
+
+services:
+  netns:
+    # Any image with a sleep works; this one is already pulled for postgres
+    # and lua-role, and is multi-arch.
+    image: postgres:18
+    entrypoint: ["sleep", "infinity"]
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      default:
+        ipv4_address: ${AICC_APP_IP:-10.130.0.10}
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-8080}:8080"
+      - "${SIP_BIND:-0.0.0.0}:5060:5060/udp"
+      - "${SIP_BIND:-0.0.0.0}:5060:5060/tcp"
+      - "${SIP_BIND:-0.0.0.0}:5066:5066/tcp"
+      # 200 ports, 100 RTP/RTCP pairs. Each published port costs a forwarder
+      # in the VM; widen RTP_START and RTP_END together.
+      - "${SIP_BIND:-0.0.0.0}:${RTP_START:-16384}-${RTP_END:-16583}:${RTP_START:-16384}-${RTP_END:-16583}/udp"
+
+  aicc:
+    network_mode: service:netns
+    networks: !reset null
+    ports: !reset []
+    depends_on:
+      netns:
+        condition: service_started
+    environment:
+      AICC_ESL_ADDR: 127.0.0.1:18021
+      AICC_METRICS_ADDR: 127.0.0.1:9090
+
+  freeswitch:
+    network_mode: service:netns
+    ports: !reset []
+    environment:
+      # AICC_BOT_HOST stays AICC_APP_IP: the namespace's own eth0 address.
+      FS_ESL_LISTEN_IP: 127.0.0.1
+      FS_RTP_START_PORT: ${RTP_START:-16384}
+      FS_RTP_END_PORT: ${RTP_END:-16583}
