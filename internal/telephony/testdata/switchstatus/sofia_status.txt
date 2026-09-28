@@ -1,0 +1,10 @@
+                     Name	   Type	                                      Data	State
+=================================================================================================
+            external-ipv6	profile	                  sip:mod_sofia@[::1]:5080	RUNNING (0)
+           192.168.31.111	  alias	                                  internal	ALIASED
+                 external	profile	         sip:mod_sofia@192.168.31.111:5080	RUNNING (0)
+       external::aicc_bot	gateway	           sip:FreeSWITCH@10.130.0.10:6060	NOREG
+            internal-ipv6	profile	                  sip:mod_sofia@[::1]:5060	RUNNING (0)
+                 internal	profile	         sip:mod_sofia@192.168.31.111:5060	RUNNING (0)
+=================================================================================================
+4 profiles 1 alias

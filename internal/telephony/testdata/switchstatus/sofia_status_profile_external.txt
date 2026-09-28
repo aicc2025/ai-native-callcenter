@@ -1,0 +1,34 @@
+=================================================================================================
+Name             	external
+Domain Name      	N/A
+Auto-NAT         	false
+DBName           	sofia_reg_external
+Pres Hosts       	
+Dialplan         	XML
+Context          	public
+Challenge Realm  	auto_to
+RTP-IP           	10.130.0.3
+Ext-RTP-IP       	192.168.31.111
+SIP-IP           	10.130.0.3
+Ext-SIP-IP       	192.168.31.111
+URL              	sip:mod_sofia@192.168.31.111:5080
+BIND-URL         	sip:mod_sofia@192.168.31.111:5080;maddr=10.130.0.3;transport=udp,tcp
+HOLD-MUSIC       	local_stream://moh
+OUTBOUND-PROXY   	N/A
+CODECS IN        	OPUS,G722,PCMU,PCMA
+CODECS OUT       	OPUS,G722,PCMU,PCMA
+TEL-EVENT        	101
+DTMF-MODE        	rfc2833
+CNG              	13
+SESSION-TO       	0
+MAX-DIALOG       	0
+MAX-RECV-RPS     	1000
+NOMEDIA          	false
+LATE-NEG         	true
+PROXY-MEDIA      	false
+AGGRESSIVENAT    	false
+CALLS-IN         	0
+FAILED-CALLS-IN  	0
+CALLS-OUT        	1
+FAILED-CALLS-OUT 	0
+REGISTRATIONS    	0
