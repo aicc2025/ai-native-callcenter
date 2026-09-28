@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -32,10 +31,10 @@ import (
 // answer by hand. It changes nothing: no migration, no instance lock, nothing
 // written to the switch.
 //
-// Each check prints one line, `STATE CODE message`, and a failed check a
-// second line with what to do about it. The exit status is 1 if and only if a
-// check failed; SKIP means the check could not be asked honestly here, never
-// that it passed.
+// Each check prints one line: its state, its name and a message, and a failed
+// check also its code and a second line with what to do about it. The exit
+// status is 1 if and only if a check failed; SKIP means the check could not be
+// asked honestly here, never that it passed.
 
 // DoctorState is the outcome of one check.
 type DoctorState string
@@ -48,9 +47,30 @@ const (
 	DoctorStateSkip DoctorState = "SKIP"
 )
 
-// DoctorCode names a check. The values are stable: an installer matches on
-// them. SWITCH_DOWN means what it means in the API's error codes — the
-// application has no working link to the switch.
+// DoctorCheck names a check. The values are stable lower_snake names; each
+// result carries one, whatever its state.
+type DoctorCheck string
+
+const (
+	DoctorCheckApp                  DoctorCheck = "app"
+	DoctorCheckSwitchLink           DoctorCheck = "switch_link"
+	DoctorCheckDatabase             DoctorCheck = "database"
+	DoctorCheckMigrations           DoctorCheck = "migrations"
+	DoctorCheckSchema               DoctorCheck = "schema"
+	DoctorCheckSwitchReachable      DoctorCheck = "switch_reachable"
+	DoctorCheckSwitchAuth           DoctorCheck = "switch_auth"
+	DoctorCheckSIPProfiles          DoctorCheck = "sip_profiles"
+	DoctorCheckBotGateway           DoctorCheck = "bot_gateway"
+	DoctorCheckExternalIP           DoctorCheck = "external_ip"
+	DoctorCheckExternalIPAdvertised DoctorCheck = "external_ip_advertised"
+	DoctorCheckProviderKey          DoctorCheck = "provider_key"
+	DoctorCheckProviderSession      DoctorCheck = "provider_session"
+)
+
+// DoctorCode names a failure. The values are stable: an installer matches on
+// them. A code appears only on a failed check. SWITCH_DOWN means what it means
+// in the API's error codes — the application has no working link to the
+// switch.
 type DoctorCode string
 
 const (
@@ -65,36 +85,50 @@ const (
 	DoctorCodeBotGatewayDown        DoctorCode = "BOT_GATEWAY_DOWN"
 	DoctorCodeExternalIPNotOnHost   DoctorCode = "EXTERNAL_IP_NOT_ON_HOST"
 	DoctorCodeExternalIPStale       DoctorCode = "EXTERNAL_IP_STALE"
-	DoctorCodeMediaPortUnreachable  DoctorCode = "MEDIA_PORT_UNREACHABLE"
 	DoctorCodeProviderKeyMissing    DoctorCode = "PROVIDER_KEY_MISSING"
 	DoctorCodeProviderSessionFailed DoctorCode = "PROVIDER_SESSION_FAILED"
 )
 
-// doctorCodes is every code, in the order the checks run.
-var doctorCodes = []DoctorCode{
-	DoctorCodeAppNotReady,
-	DoctorCodeSwitchDown,
-	DoctorCodeDBUnreachable,
-	DoctorCodeDBMigrationsPending,
-	DoctorCodeDBSchemaNewer,
-	DoctorCodeSwitchUnreachable,
-	DoctorCodeSwitchAuthRejected,
-	DoctorCodeSwitchProfileDown,
-	DoctorCodeBotGatewayDown,
-	DoctorCodeExternalIPNotOnHost,
-	DoctorCodeExternalIPStale,
-	DoctorCodeMediaPortUnreachable,
-	DoctorCodeProviderKeyMissing,
-	DoctorCodeProviderSessionFailed,
+// doctorChecks is every check, in the order they run, with the code it fails
+// with.
+var doctorChecks = []struct {
+	check DoctorCheck
+	code  DoctorCode
+}{
+	{DoctorCheckApp, DoctorCodeAppNotReady},
+	{DoctorCheckSwitchLink, DoctorCodeSwitchDown},
+	{DoctorCheckDatabase, DoctorCodeDBUnreachable},
+	{DoctorCheckMigrations, DoctorCodeDBMigrationsPending},
+	{DoctorCheckSchema, DoctorCodeDBSchemaNewer},
+	{DoctorCheckSwitchReachable, DoctorCodeSwitchUnreachable},
+	{DoctorCheckSwitchAuth, DoctorCodeSwitchAuthRejected},
+	{DoctorCheckSIPProfiles, DoctorCodeSwitchProfileDown},
+	{DoctorCheckBotGateway, DoctorCodeBotGatewayDown},
+	{DoctorCheckExternalIP, DoctorCodeExternalIPNotOnHost},
+	{DoctorCheckExternalIPAdvertised, DoctorCodeExternalIPStale},
+	{DoctorCheckProviderKey, DoctorCodeProviderKeyMissing},
+	{DoctorCheckProviderSession, DoctorCodeProviderSessionFailed},
+}
+
+// codeFor is the code a check fails with.
+func codeFor(check DoctorCheck) DoctorCode {
+	for _, c := range doctorChecks {
+		if c.check == check {
+			return c.code
+		}
+	}
+	panic("doctor: unknown check " + string(check))
 }
 
 // doctorResult is one check's outcome.
 type doctorResult struct {
+	Check   DoctorCheck `json:"check"`
 	State   DoctorState `json:"state"`
-	Code    DoctorCode  `json:"code"`
 	Message string      `json:"message"`
-	// Fix is what to do about a failure; empty unless State is FAIL.
-	Fix string `json:"fix,omitempty"`
+	// Code and Fix say what failed and what to do about it; empty unless
+	// State is FAIL.
+	Code DoctorCode `json:"code,omitempty"`
+	Fix  string     `json:"fix,omitempty"`
 }
 
 // botGatewayName is the gateway the switch reaches the AI leg through. It is
@@ -121,7 +155,6 @@ type doctorOptions struct {
 	readyzURL    string
 	externalIP   string
 	hostAddrs    []string
-	mediaPort    int
 	skipProvider bool
 	asJSON       bool
 }
@@ -152,7 +185,6 @@ func runDoctor(args []string) error {
 	readyzURL := fs.String("readyz-url", "", "the app's readiness URL (default: derived from AICC_METRICS_ADDR)")
 	externalIP := fs.String("external-ip", "", "the address phones reach the switch at (default: $FS_EXTERNAL_IP)")
 	hostAddrs := fs.String("host-addrs", "", "comma-separated addresses of the host (default: this namespace's interfaces)")
-	mediaPort := fs.Int("media-port", 0, "an RTP port to check for reachability")
 	skipProvider := fs.Bool("skip-provider", false, "do not open a session with the speech provider")
 	asJSON := fs.Bool("json", false, "print the results as JSON")
 	if err := fs.Parse(args); err != nil {
@@ -167,7 +199,6 @@ func runDoctor(args []string) error {
 		wait:         *wait,
 		readyzURL:    *readyzURL,
 		externalIP:   *externalIP,
-		mediaPort:    *mediaPort,
 		skipProvider: *skipProvider,
 		asJSON:       *asJSON,
 	}
@@ -250,21 +281,21 @@ func doctor(ctx context.Context, d doctorDeps, opts doctorOptions) []doctorResul
 	out = append(out, results...)
 	out = append(out, checkBotGateway(d, sw.reader)...)
 	out = append(out, checkExternalIP(d, opts, sw)...)
-	out = append(out, checkMediaPort(opts))
+	// LAN media (RTP) reachability is verified by the release checklist, not by doctor.
 	out = append(out, checkProvider(ctx, d, opts)...)
 	return out
 }
 
-func pass(code DoctorCode, msg string) doctorResult {
-	return doctorResult{State: DoctorStatePass, Code: code, Message: msg}
+func pass(check DoctorCheck, msg string) doctorResult {
+	return doctorResult{Check: check, State: DoctorStatePass, Message: msg}
 }
 
-func fail(code DoctorCode, msg, fix string) doctorResult {
-	return doctorResult{State: DoctorStateFail, Code: code, Message: msg, Fix: fix}
+func fail(check DoctorCheck, msg, fix string) doctorResult {
+	return doctorResult{Check: check, State: DoctorStateFail, Message: msg, Code: codeFor(check), Fix: fix}
 }
 
-func skip(code DoctorCode, msg string) doctorResult {
-	return doctorResult{State: DoctorStateSkip, Code: code, Message: msg}
+func skip(check DoctorCheck, msg string) doctorResult {
+	return doctorResult{Check: check, State: DoctorStateSkip, Message: msg}
 }
 
 // readyzReply is one answer from /readyz.
@@ -321,33 +352,33 @@ func checkApp(ctx context.Context, d doctorDeps, opts doctorOptions) []doctorRes
 
 	if err != nil {
 		return []doctorResult{
-			fail(DoctorCodeAppNotReady, "no answer from "+opts.readyzURL+": "+err.Error(),
+			fail(DoctorCheckApp, "no answer from "+opts.readyzURL+": "+err.Error(),
 				"check `docker compose logs aicc`; the app exits on a configuration error, and --readyz-url must match AICC_METRICS_ADDR"),
-			skip(DoctorCodeSwitchDown, "the app did not answer, so its switch link is unknown"),
+			skip(DoctorCheckSwitchLink, "the app did not answer, so its switch link is unknown"),
 		}
 	}
 	var out []doctorResult
 	if reply.status != http.StatusOK {
-		out = append(out, fail(DoctorCodeAppNotReady,
+		out = append(out, fail(DoctorCheckApp,
 			fmt.Sprintf("%s answered %d: %s", opts.readyzURL, reply.status, reply.head),
-			"the app cannot reach its database; see DB_UNREACHABLE below and `docker compose logs aicc`"))
+			"the app cannot reach its database; see the database check below and `docker compose logs aicc`"))
 	} else {
 		msg := "the app is ready"
 		if m, ok := reply.lines["migrations"]; ok {
 			msg += ", schema " + m
 		}
-		out = append(out, pass(DoctorCodeAppNotReady, msg))
+		out = append(out, pass(DoctorCheckApp, msg))
 	}
 
 	switch reply.lines["switch"] {
 	case "up":
-		out = append(out, pass(DoctorCodeSwitchDown, "the app's link to the switch is up"))
+		out = append(out, pass(DoctorCheckSwitchLink, "the app's link to the switch is up"))
 	case "down":
-		out = append(out, fail(DoctorCodeSwitchDown, "the app has no link to the switch",
-			"check that the freeswitch container is running and that AICC_ESL_ADDR and AICC_ESL_PASSWORD match it (see SWITCH_* below)"))
+		out = append(out, fail(DoctorCheckSwitchLink, "the app has no link to the switch",
+			"check that the freeswitch container is running and that AICC_ESL_ADDR and AICC_ESL_PASSWORD match it (see the switch_* checks below)"))
 	default:
 		// An application older than this doctor does not report its link.
-		out = append(out, skip(DoctorCodeSwitchDown, "the app does not report its switch link"))
+		out = append(out, skip(DoctorCheckSwitchLink, "the app does not report its switch link"))
 	}
 	return out
 }
@@ -359,34 +390,34 @@ func checkDatabase(ctx context.Context, d doctorDeps) []doctorResult {
 	st, closeStore, err := d.openStore(ctx)
 	if err != nil {
 		return []doctorResult{
-			fail(DoctorCodeDBUnreachable, oneLine(err.Error()),
+			fail(DoctorCheckDatabase, oneLine(err.Error()),
 				"check that the postgres container is healthy and that AICC_DATABASE_URL points at it"),
-			skip(DoctorCodeDBMigrationsPending, "the database did not answer"),
-			skip(DoctorCodeDBSchemaNewer, "the database did not answer"),
+			skip(DoctorCheckMigrations, "the database did not answer"),
+			skip(DoctorCheckSchema, "the database did not answer"),
 		}
 	}
 	defer closeStore()
-	out := []doctorResult{pass(DoctorCodeDBUnreachable, "the database answers")}
+	out := []doctorResult{pass(DoctorCheckDatabase, "the database answers")}
 
 	m, err := st.MigrationStatus(ctx)
 	if err != nil {
 		return append(out,
-			fail(DoctorCodeDBMigrationsPending, "cannot read the schema version: "+oneLine(err.Error()),
+			fail(DoctorCheckMigrations, "cannot read the schema version: "+oneLine(err.Error()),
 				"check that AICC_DATABASE_URL's role can read goose_db_version"),
-			skip(DoctorCodeDBSchemaNewer, "the schema version is unknown"))
+			skip(DoctorCheckSchema, "the schema version is unknown"))
 	}
 	version := fmt.Sprintf("schema %d, this binary's latest %d", m.DBVersion, m.LatestVersion)
 	if m.HasPending {
-		out = append(out, fail(DoctorCodeDBMigrationsPending, version+", migrations pending",
+		out = append(out, fail(DoctorCheckMigrations, version+", migrations pending",
 			"start the app (it migrates at startup) and read `docker compose logs aicc` if it does not"))
 	} else {
-		out = append(out, pass(DoctorCodeDBMigrationsPending, version))
+		out = append(out, pass(DoctorCheckMigrations, version))
 	}
 	if m.DBVersion > m.LatestVersion {
-		out = append(out, fail(DoctorCodeDBSchemaNewer, version+": a newer release migrated this database",
+		out = append(out, fail(DoctorCheckSchema, version+": a newer release migrated this database",
 			"run the release that migrated it (or newer); downgrading over a newer schema is not supported"))
 	} else {
-		out = append(out, pass(DoctorCodeDBSchemaNewer, "the schema is not ahead of this binary"))
+		out = append(out, pass(DoctorCheckSchema, "the schema is not ahead of this binary"))
 	}
 	return out
 }
@@ -412,30 +443,30 @@ func checkSwitch(ctx context.Context, d doctorDeps) (switchProfiles, func(), []d
 
 	sw, closeSwitch, err := d.dialSwitch(dialCtx)
 	if err != nil {
-		unknown := skip(DoctorCodeSwitchProfileDown, "doctor could not connect to the switch")
+		unknown := skip(DoctorCheckSIPProfiles, "doctor could not connect to the switch")
 		if errors.Is(err, esl.ErrAuthFailed) {
 			return switchProfiles{err: err}, nothing, []doctorResult{
-				pass(DoctorCodeSwitchUnreachable, "the switch answers at "+d.cfg.ESLAddr),
-				fail(DoctorCodeSwitchAuthRejected, "the switch refused AICC_ESL_PASSWORD",
+				pass(DoctorCheckSwitchReachable, "the switch answers at "+d.cfg.ESLAddr),
+				fail(DoctorCheckSwitchAuth, "the switch refused AICC_ESL_PASSWORD",
 					"set AICC_ESL_PASSWORD to the switch's event-socket password (the stack's ESL_PASSWORD) and recreate both containers"),
 				unknown,
 			}
 		}
 		return switchProfiles{err: err}, nothing, []doctorResult{
-			fail(DoctorCodeSwitchUnreachable, "no answer from the switch at "+d.cfg.ESLAddr+": "+oneLine(err.Error()),
+			fail(DoctorCheckSwitchReachable, "no answer from the switch at "+d.cfg.ESLAddr+": "+oneLine(err.Error()),
 				"check that the freeswitch container is running and healthy and that AICC_ESL_ADDR points at it"),
-			skip(DoctorCodeSwitchAuthRejected, "the switch did not answer"),
+			skip(DoctorCheckSwitchAuth, "the switch did not answer"),
 			unknown,
 		}
 	}
 	out := []doctorResult{
-		pass(DoctorCodeSwitchUnreachable, "the switch answers at "+d.cfg.ESLAddr),
-		pass(DoctorCodeSwitchAuthRejected, "the switch accepted AICC_ESL_PASSWORD"),
+		pass(DoctorCheckSwitchReachable, "the switch answers at "+d.cfg.ESLAddr),
+		pass(DoctorCheckSwitchAuth, "the switch accepted AICC_ESL_PASSWORD"),
 	}
 	profiles, err := sw.Profiles()
 	if err != nil {
 		return switchProfiles{reader: sw, err: err}, closeSwitch, append(out,
-			fail(DoctorCodeSwitchProfileDown, "cannot list the switch's SIP profiles: "+oneLine(err.Error()),
+			fail(DoctorCheckSIPProfiles, "cannot list the switch's SIP profiles: "+oneLine(err.Error()),
 				"check `docker compose logs freeswitch`"))
 	}
 	var down []string
@@ -446,45 +477,45 @@ func checkSwitch(ctx context.Context, d doctorDeps) (switchProfiles, func(), []d
 		}
 	}
 	if len(down) > 0 {
-		out = append(out, fail(DoctorCodeSwitchProfileDown,
+		out = append(out, fail(DoctorCheckSIPProfiles,
 			"SIP profile not running: "+strings.Join(down, ", "),
 			"a profile that fails to start is usually a port already taken on the host or an address it cannot bind; check `docker compose logs freeswitch`"))
 	} else {
-		out = append(out, pass(DoctorCodeSwitchProfileDown, "SIP profiles internal and external are running"))
+		out = append(out, pass(DoctorCheckSIPProfiles, "SIP profiles internal and external are running"))
 	}
 	return switchProfiles{reader: sw, profiles: profiles}, closeSwitch, out
 }
 
 func checkBotGateway(d doctorDeps, sw switchReader) []doctorResult {
 	if !d.cfg.IsBotEnabled {
-		return []doctorResult{skip(DoctorCodeBotGatewayDown, "the AI leg is off (AICC_BOT_ENABLED)")}
+		return []doctorResult{skip(DoctorCheckBotGateway, "the AI leg is off (AICC_BOT_ENABLED)")}
 	}
 	if sw == nil {
-		return []doctorResult{skip(DoctorCodeBotGatewayDown, "doctor could not connect to the switch")}
+		return []doctorResult{skip(DoctorCheckBotGateway, "doctor could not connect to the switch")}
 	}
 	up, err := sw.GatewayUp(botGatewayName)
 	switch {
 	case errors.Is(err, telephony.ErrUnknownGateway):
-		return []doctorResult{fail(DoctorCodeBotGatewayDown,
+		return []doctorResult{fail(DoctorCheckBotGateway,
 			"the switch has no gateway named "+botGatewayName,
 			"the switch image defines it from AICC_BOT_HOST; recreate the freeswitch container from this release's image")}
 	case err != nil:
-		return []doctorResult{fail(DoctorCodeBotGatewayDown,
+		return []doctorResult{fail(DoctorCheckBotGateway,
 			"cannot ask the switch about "+botGatewayName+": "+oneLine(err.Error()),
 			"check `docker compose logs freeswitch`")}
 	case !up:
-		return []doctorResult{fail(DoctorCodeBotGatewayDown,
+		return []doctorResult{fail(DoctorCheckBotGateway,
 			"the switch cannot reach the AI leg through "+botGatewayName,
 			"the gateway must name an IP address the switch can send to (AICC_APP_IP in the stack), never loopback; check that the app is listening on AICC_BOT_SIP_PORT")}
 	}
-	return []doctorResult{pass(DoctorCodeBotGatewayDown, "the switch reaches the AI leg through "+botGatewayName)}
+	return []doctorResult{pass(DoctorCheckBotGateway, "the switch reaches the AI leg through "+botGatewayName)}
 }
 
 func checkExternalIP(d doctorDeps, opts doctorOptions, sw switchProfiles) []doctorResult {
 	if opts.externalIP == "" {
 		return []doctorResult{
-			skip(DoctorCodeExternalIPNotOnHost, "neither FS_EXTERNAL_IP nor --external-ip is set"),
-			skip(DoctorCodeExternalIPStale, "neither FS_EXTERNAL_IP nor --external-ip is set"),
+			skip(DoctorCheckExternalIP, "neither FS_EXTERNAL_IP nor --external-ip is set"),
+			skip(DoctorCheckExternalIPAdvertised, "neither FS_EXTERNAL_IP nor --external-ip is set"),
 		}
 	}
 	want := net.ParseIP(opts.externalIP)
@@ -492,18 +523,18 @@ func checkExternalIP(d doctorDeps, opts doctorOptions, sw switchProfiles) []doct
 	var out []doctorResult
 	switch {
 	case want == nil:
-		out = append(out, fail(DoctorCodeExternalIPNotOnHost,
+		out = append(out, fail(DoctorCheckExternalIP,
 			"FS_EXTERNAL_IP is not an IP address: "+opts.externalIP,
 			"set FS_EXTERNAL_IP in deploy/.env to the host address phones reach, then `docker compose up -d`"))
 	default:
 		addrs, source, err := hostAddresses(d, opts)
 		switch {
 		case err != nil:
-			out = append(out, skip(DoctorCodeExternalIPNotOnHost, "cannot list this host's addresses: "+oneLine(err.Error())))
+			out = append(out, skip(DoctorCheckExternalIP, "cannot list this host's addresses: "+oneLine(err.Error())))
 		case slices.ContainsFunc(addrs, want.Equal):
-			out = append(out, pass(DoctorCodeExternalIPNotOnHost, opts.externalIP+" is one of "+source))
+			out = append(out, pass(DoctorCheckExternalIP, opts.externalIP+" is one of "+source))
 		default:
-			out = append(out, fail(DoctorCodeExternalIPNotOnHost,
+			out = append(out, fail(DoctorCheckExternalIP,
 				opts.externalIP+" is not one of "+source+": "+joinIPs(addrs),
 				"set FS_EXTERNAL_IP to this host's own address (or pass --host-addrs when doctor cannot see the host's interfaces), then `docker compose up -d`"))
 		}
@@ -511,9 +542,9 @@ func checkExternalIP(d doctorDeps, opts doctorOptions, sw switchProfiles) []doct
 
 	switch {
 	case sw.reader == nil || sw.err != nil:
-		out = append(out, skip(DoctorCodeExternalIPStale, "the switch's profiles are unknown"))
+		out = append(out, skip(DoctorCheckExternalIPAdvertised, "the switch's profiles are unknown"))
 	case want == nil:
-		out = append(out, skip(DoctorCodeExternalIPStale, "FS_EXTERNAL_IP is not an IP address"))
+		out = append(out, skip(DoctorCheckExternalIPAdvertised, "FS_EXTERNAL_IP is not an IP address"))
 	default:
 		var stale []string
 		for _, p := range sw.profiles {
@@ -525,11 +556,11 @@ func checkExternalIP(d doctorDeps, opts doctorOptions, sw switchProfiles) []doct
 			}
 		}
 		if len(stale) > 0 {
-			out = append(out, fail(DoctorCodeExternalIPStale,
+			out = append(out, fail(DoctorCheckExternalIPAdvertised,
 				strings.Join(stale, ", ")+", not "+opts.externalIP,
 				"the switch reads FS_EXTERNAL_IP when its container is created: `docker compose up -d --force-recreate freeswitch`"))
 		} else {
-			out = append(out, pass(DoctorCodeExternalIPStale, "the switch advertises "+opts.externalIP+" for media"))
+			out = append(out, pass(DoctorCheckExternalIPAdvertised, "the switch advertises "+opts.externalIP+" for media"))
 		}
 	}
 	return out
@@ -572,59 +603,41 @@ func joinIPs(ips []net.IP) string {
 	return strings.Join(s, ", ")
 }
 
-// checkMediaPort cannot be answered from here, and says so rather than
-// pretending.
-//
-// The RTP ports belong to the switch. Doctor cannot bind one to listen for its
-// own probe (the switch holds it on a host-network install, and on a bridge
-// network the host forwards it to the switch's container, not to this one),
-// and it cannot see what arrives at the switch. A packet sent from inside the
-// host to its own external address also proves nothing about the firewall or
-// NAT in front of it, which is the only thing this check would be for. The
-// honest probe is a peer outside the host.
-func checkMediaPort(opts doctorOptions) doctorResult {
-	if opts.mediaPort == 0 {
-		return skip(DoctorCodeMediaPortUnreachable, "no --media-port given")
-	}
-	return skip(DoctorCodeMediaPortUnreachable,
-		"UDP "+strconv.Itoa(opts.mediaPort)+" cannot be probed from inside the host: the switch owns it; test it from a phone outside the network")
-}
-
 func checkProvider(ctx context.Context, d doctorDeps, opts doctorOptions) []doctorResult {
 	if !d.cfg.IsBotEnabled {
 		return []doctorResult{
-			skip(DoctorCodeProviderKeyMissing, "the AI leg is off (AICC_BOT_ENABLED)"),
-			skip(DoctorCodeProviderSessionFailed, "the AI leg is off (AICC_BOT_ENABLED)"),
+			skip(DoctorCheckProviderKey, "the AI leg is off (AICC_BOT_ENABLED)"),
+			skip(DoctorCheckProviderSession, "the AI leg is off (AICC_BOT_ENABLED)"),
 		}
 	}
 	profile, err := voiceProfile(d.cfg)
 	if err != nil {
-		// The app refuses to start on this, so APP_NOT_READY has failed too.
+		// The app refuses to start on this, so the app check has failed too.
 		msg := "AICC_PROVIDER: " + oneLine(err.Error())
-		return []doctorResult{skip(DoctorCodeProviderKeyMissing, msg), skip(DoctorCodeProviderSessionFailed, msg)}
+		return []doctorResult{skip(DoctorCheckProviderKey, msg), skip(DoctorCheckProviderSession, msg)}
 	}
 
 	discard := slog.New(slog.DiscardHandler)
 	if reportMissingProviderKey(discard, profile, d.getenv) {
 		return []doctorResult{
-			fail(DoctorCodeProviderKeyMissing, profile.APIKeyEnv+" is not set for provider "+profile.Name,
+			fail(DoctorCheckProviderKey, profile.APIKeyEnv+" is not set for provider "+profile.Name,
 				"set "+profile.APIKeyEnv+" in deploy/.env and `docker compose up -d` (restart does not re-read .env)"),
-			skip(DoctorCodeProviderSessionFailed, "no key to open a session with"),
+			skip(DoctorCheckProviderSession, "no key to open a session with"),
 		}
 	}
-	out := []doctorResult{pass(DoctorCodeProviderKeyMissing, "provider "+profile.Name+" has a key")}
+	out := []doctorResult{pass(DoctorCheckProviderKey, "provider "+profile.Name+" has a key")}
 	if opts.skipProvider {
-		return append(out, skip(DoctorCodeProviderSessionFailed, "--skip-provider"))
+		return append(out, skip(DoctorCheckProviderSession, "--skip-provider"))
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, providerProbeTimeout)
 	defer cancel()
 	if err := probeProvider(ctx, d, profile, discard); err != nil {
-		return append(out, fail(DoctorCodeProviderSessionFailed,
+		return append(out, fail(DoctorCheckProviderSession,
 			"provider "+profile.Name+" ("+profile.Model+") did not open a session: "+oneLine(err.Error()),
 			"check "+profile.APIKeyEnv+" and AICC_PROVIDER_ENDPOINT/AICC_PROVIDER_MODEL, and that this host can reach "+profile.Endpoint))
 	}
-	return append(out, pass(DoctorCodeProviderSessionFailed,
+	return append(out, pass(DoctorCheckProviderSession,
 		"provider "+profile.Name+" ("+profile.Model+") opened a session"))
 }
 
@@ -665,12 +678,20 @@ func printDoctor(w io.Writer, results []doctorResult, asJSON bool) error {
 			Results []doctorResult `json:"results"`
 		}{results})
 	}
+	width := 0
+	for _, c := range doctorChecks {
+		width = max(width, len(c.check))
+	}
 	for _, r := range results {
-		if _, err := fmt.Fprintf(w, "%-4s %s %s\n", r.State, r.Code, r.Message); err != nil {
+		line := fmt.Sprintf("%-4s  %-*s  %s", r.State, width, r.Check, r.Message)
+		if r.State == DoctorStateFail {
+			line = fmt.Sprintf("%-4s  %-*s  %s  %s", r.State, width, r.Check, r.Code, r.Message)
+		}
+		if _, err := fmt.Fprintln(w, line); err != nil {
 			return err
 		}
 		if r.State == DoctorStateFail && r.Fix != "" {
-			if _, err := fmt.Fprintf(w, "     fix: %s\n", r.Fix); err != nil {
+			if _, err := fmt.Fprintf(w, "      fix: %s\n", r.Fix); err != nil {
 				return err
 			}
 		}

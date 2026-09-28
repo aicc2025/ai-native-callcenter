@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -149,29 +151,34 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-func (h *harness) run() map[DoctorCode]doctorResult {
+func (h *harness) run() map[DoctorCheck]doctorResult {
 	results := doctor(context.Background(), h.deps, h.opts)
-	byCode := map[DoctorCode]doctorResult{}
+	byCheck := map[DoctorCheck]doctorResult{}
 	for _, r := range results {
-		if _, dup := byCode[r.Code]; dup {
-			panic("code reported twice: " + string(r.Code))
+		if _, dup := byCheck[r.Check]; dup {
+			panic("check reported twice: " + string(r.Check))
 		}
-		byCode[r.Code] = r
+		byCheck[r.Check] = r
 	}
-	return byCode
+	return byCheck
 }
 
-func wantState(t *testing.T, got map[DoctorCode]doctorResult, code DoctorCode, state DoctorState) {
+func wantState(t *testing.T, got map[DoctorCheck]doctorResult, check DoctorCheck, state DoctorState) {
 	t.Helper()
-	r, ok := got[code]
+	r, ok := got[check]
 	if !ok {
-		t.Fatalf("%s was not reported", code)
+		t.Fatalf("%s was not reported", check)
 	}
 	if r.State != state {
-		t.Errorf("%s = %s (%s), want %s", code, r.State, r.Message, state)
+		t.Errorf("%s = %s (%s), want %s", check, r.State, r.Message, state)
 	}
-	if r.State == DoctorStateFail && r.Fix == "" {
-		t.Errorf("%s failed without saying how to fix it", code)
+	switch {
+	case r.State == DoctorStateFail && r.Fix == "":
+		t.Errorf("%s failed without saying how to fix it", check)
+	case r.State == DoctorStateFail && r.Code != codeFor(check):
+		t.Errorf("%s failed with code %q, want %q", check, r.Code, codeFor(check))
+	case r.State != DoctorStateFail && (r.Code != "" || r.Fix != ""):
+		t.Errorf("%s is %s but carries code %q / fix %q", check, r.State, r.Code, r.Fix)
 	}
 }
 
@@ -179,15 +186,11 @@ func TestAHealthyDeploymentPassesEveryCheckItCanAsk(t *testing.T) {
 	h := newHarness(t)
 	got := h.run()
 
-	if len(got) != len(doctorCodes) {
-		t.Fatalf("reported %d checks, want every one of %d", len(got), len(doctorCodes))
+	if len(got) != len(doctorChecks) {
+		t.Fatalf("reported %d checks, want every one of %d", len(got), len(doctorChecks))
 	}
-	for _, code := range doctorCodes {
-		want := DoctorStatePass
-		if code == DoctorCodeMediaPortUnreachable {
-			want = DoctorStateSkip
-		}
-		wantState(t, got, code, want)
+	for _, c := range doctorChecks {
+		wantState(t, got, c.check, DoctorStatePass)
 	}
 	if !h.session.closed.Load() {
 		t.Error("the provider session was left open")
@@ -198,8 +201,8 @@ func TestTheAppsSwitchLinkIsReadFromReadyz(t *testing.T) {
 	h := newHarness(t)
 	h.opts.readyzURL = readyzServer(t, readyBody("down")).URL
 	got := h.run()
-	wantState(t, got, DoctorCodeAppNotReady, DoctorStatePass)
-	wantState(t, got, DoctorCodeSwitchDown, DoctorStateFail)
+	wantState(t, got, DoctorCheckApp, DoctorStatePass)
+	wantState(t, got, DoctorCheckSwitchLink, DoctorStateFail)
 }
 
 // An application older than this doctor answers "ready" and nothing else. Its
@@ -208,8 +211,8 @@ func TestAnAppThatDoesNotReportItsSwitchLinkIsSkippedNotFailed(t *testing.T) {
 	h := newHarness(t)
 	h.opts.readyzURL = readyzServer(t, func(w http.ResponseWriter) { fmt.Fprint(w, "ready\n") }).URL
 	got := h.run()
-	wantState(t, got, DoctorCodeAppNotReady, DoctorStatePass)
-	wantState(t, got, DoctorCodeSwitchDown, DoctorStateSkip)
+	wantState(t, got, DoctorCheckApp, DoctorStatePass)
+	wantState(t, got, DoctorCheckSwitchLink, DoctorStateSkip)
 }
 
 func TestAnAppThatDoesNotAnswerFails(t *testing.T) {
@@ -218,8 +221,8 @@ func TestAnAppThatDoesNotAnswerFails(t *testing.T) {
 	srv.Close()
 	h.opts.readyzURL = srv.URL
 	got := h.run()
-	wantState(t, got, DoctorCodeAppNotReady, DoctorStateFail)
-	wantState(t, got, DoctorCodeSwitchDown, DoctorStateSkip)
+	wantState(t, got, DoctorCheckApp, DoctorStateFail)
+	wantState(t, got, DoctorCheckSwitchLink, DoctorStateSkip)
 }
 
 func TestWaitKeepsAskingUntilTheSwitchLinkComesUp(t *testing.T) {
@@ -227,8 +230,8 @@ func TestWaitKeepsAskingUntilTheSwitchLinkComesUp(t *testing.T) {
 	h.opts.wait = 30 * time.Second
 	h.opts.readyzURL = readyzServer(t, notReady, readyBody("down"), readyBody("up")).URL
 	got := h.run()
-	wantState(t, got, DoctorCodeAppNotReady, DoctorStatePass)
-	wantState(t, got, DoctorCodeSwitchDown, DoctorStatePass)
+	wantState(t, got, DoctorCheckApp, DoctorStatePass)
+	wantState(t, got, DoctorCheckSwitchLink, DoctorStatePass)
 	if h.sleeps != 2 {
 		t.Errorf("slept %d times, want 2", h.sleeps)
 	}
@@ -239,8 +242,8 @@ func TestWaitGivesUpOnAnAppThatIsNeverReady(t *testing.T) {
 	h.opts.wait = 5 * time.Second
 	h.opts.readyzURL = readyzServer(t, notReady).URL
 	got := h.run()
-	wantState(t, got, DoctorCodeAppNotReady, DoctorStateFail)
-	wantState(t, got, DoctorCodeSwitchDown, DoctorStateFail)
+	wantState(t, got, DoctorCheckApp, DoctorStateFail)
+	wantState(t, got, DoctorCheckSwitchLink, DoctorStateFail)
 	if h.sleeps != 5 {
 		t.Errorf("slept %d times, want 5", h.sleeps)
 	}
@@ -250,7 +253,7 @@ func TestWithoutWaitReadyzIsAskedOnce(t *testing.T) {
 	h := newHarness(t)
 	h.opts.readyzURL = readyzServer(t, notReady, readyBody("up")).URL
 	got := h.run()
-	wantState(t, got, DoctorCodeAppNotReady, DoctorStateFail)
+	wantState(t, got, DoctorCheckApp, DoctorStateFail)
 	if h.sleeps != 0 {
 		t.Errorf("slept %d times without --wait", h.sleeps)
 	}
@@ -273,9 +276,9 @@ func TestTheSchemaIsComparedWithThisBinary(t *testing.T) {
 				return fakeMigrations{state: tc.state}, func() {}, nil
 			}
 			got := h.run()
-			wantState(t, got, DoctorCodeDBUnreachable, DoctorStatePass)
-			wantState(t, got, DoctorCodeDBMigrationsPending, tc.pending)
-			wantState(t, got, DoctorCodeDBSchemaNewer, tc.isNewer)
+			wantState(t, got, DoctorCheckDatabase, DoctorStatePass)
+			wantState(t, got, DoctorCheckMigrations, tc.pending)
+			wantState(t, got, DoctorCheckSchema, tc.isNewer)
 		})
 	}
 }
@@ -286,9 +289,9 @@ func TestAnUnreachableDatabaseFailsOnceAndSkipsWhatDependsOnIt(t *testing.T) {
 		return nil, nil, errors.New("dial tcp 10.130.0.3:5432: connect: connection refused")
 	}
 	got := h.run()
-	wantState(t, got, DoctorCodeDBUnreachable, DoctorStateFail)
-	wantState(t, got, DoctorCodeDBMigrationsPending, DoctorStateSkip)
-	wantState(t, got, DoctorCodeDBSchemaNewer, DoctorStateSkip)
+	wantState(t, got, DoctorCheckDatabase, DoctorStateFail)
+	wantState(t, got, DoctorCheckMigrations, DoctorStateSkip)
+	wantState(t, got, DoctorCheckSchema, DoctorStateSkip)
 }
 
 func TestAWrongSwitchPasswordIsNamedAsSuch(t *testing.T) {
@@ -297,11 +300,11 @@ func TestAWrongSwitchPasswordIsNamedAsSuch(t *testing.T) {
 		return nil, nil, esl.ErrAuthFailed
 	}
 	got := h.run()
-	wantState(t, got, DoctorCodeSwitchUnreachable, DoctorStatePass)
-	wantState(t, got, DoctorCodeSwitchAuthRejected, DoctorStateFail)
-	wantState(t, got, DoctorCodeSwitchProfileDown, DoctorStateSkip)
-	wantState(t, got, DoctorCodeBotGatewayDown, DoctorStateSkip)
-	wantState(t, got, DoctorCodeExternalIPStale, DoctorStateSkip)
+	wantState(t, got, DoctorCheckSwitchReachable, DoctorStatePass)
+	wantState(t, got, DoctorCheckSwitchAuth, DoctorStateFail)
+	wantState(t, got, DoctorCheckSIPProfiles, DoctorStateSkip)
+	wantState(t, got, DoctorCheckBotGateway, DoctorStateSkip)
+	wantState(t, got, DoctorCheckExternalIPAdvertised, DoctorStateSkip)
 }
 
 func TestASwitchThatDoesNotAnswerIsNotCalledAnAuthFailure(t *testing.T) {
@@ -310,8 +313,8 @@ func TestASwitchThatDoesNotAnswerIsNotCalledAnAuthFailure(t *testing.T) {
 		return nil, nil, errors.New("dial esl: dial tcp: lookup freeswitch: no such host")
 	}
 	got := h.run()
-	wantState(t, got, DoctorCodeSwitchUnreachable, DoctorStateFail)
-	wantState(t, got, DoctorCodeSwitchAuthRejected, DoctorStateSkip)
+	wantState(t, got, DoctorCheckSwitchReachable, DoctorStateFail)
+	wantState(t, got, DoctorCheckSwitchAuth, DoctorStateSkip)
 }
 
 // fakeStatus is a switch whose answers a test chooses.
@@ -333,10 +336,10 @@ func TestAStoppedProfileAndADeadBotGatewayFail(t *testing.T) {
 		}}, func() {}, nil
 	}
 	got := h.run()
-	wantState(t, got, DoctorCodeSwitchProfileDown, DoctorStateFail)
-	wantState(t, got, DoctorCodeBotGatewayDown, DoctorStateFail)
-	if !strings.Contains(got[DoctorCodeSwitchProfileDown].Message, "external") {
-		t.Errorf("the message does not name the profile: %q", got[DoctorCodeSwitchProfileDown].Message)
+	wantState(t, got, DoctorCheckSIPProfiles, DoctorStateFail)
+	wantState(t, got, DoctorCheckBotGateway, DoctorStateFail)
+	if !strings.Contains(got[DoctorCheckSIPProfiles].Message, "external") {
+		t.Errorf("the message does not name the profile: %q", got[DoctorCheckSIPProfiles].Message)
 	}
 }
 
@@ -352,8 +355,8 @@ func TestAMissingBotGatewayFails(t *testing.T) {
 		}, func() {}, nil
 	}
 	got := h.run()
-	wantState(t, got, DoctorCodeSwitchProfileDown, DoctorStatePass)
-	wantState(t, got, DoctorCodeBotGatewayDown, DoctorStateFail)
+	wantState(t, got, DoctorCheckSIPProfiles, DoctorStatePass)
+	wantState(t, got, DoctorCheckBotGateway, DoctorStateFail)
 }
 
 func TestTheExternalAddressIsLookedForAmongTheHostsOwn(t *testing.T) {
@@ -377,7 +380,7 @@ func TestTheExternalAddressIsLookedForAmongTheHostsOwn(t *testing.T) {
 			h := newHarness(t)
 			h.opts.externalIP = tc.externalIP
 			h.opts.hostAddrs = tc.hostAddrs
-			wantState(t, h.run(), DoctorCodeExternalIPNotOnHost, tc.want)
+			wantState(t, h.run(), DoctorCheckExternalIP, tc.want)
 		})
 	}
 }
@@ -389,18 +392,12 @@ func TestASwitchStillAdvertisingAnOldAddressIsStale(t *testing.T) {
 	h.opts.externalIP = "203.0.113.9"
 	h.opts.hostAddrs = []string{"203.0.113.9"}
 	got := h.run()
-	wantState(t, got, DoctorCodeExternalIPNotOnHost, DoctorStatePass)
-	wantState(t, got, DoctorCodeExternalIPStale, DoctorStateFail)
-	if !strings.Contains(got[DoctorCodeExternalIPStale].Message, "192.168.31.111") {
+	wantState(t, got, DoctorCheckExternalIP, DoctorStatePass)
+	wantState(t, got, DoctorCheckExternalIPAdvertised, DoctorStateFail)
+	if !strings.Contains(got[DoctorCheckExternalIPAdvertised].Message, "192.168.31.111") {
 		t.Errorf("the message does not say what the switch advertises: %q",
-			got[DoctorCodeExternalIPStale].Message)
+			got[DoctorCheckExternalIPAdvertised].Message)
 	}
-}
-
-func TestTheMediaPortIsNeverClaimedReachable(t *testing.T) {
-	h := newHarness(t)
-	h.opts.mediaPort = 16384
-	wantState(t, h.run(), DoctorCodeMediaPortUnreachable, DoctorStateSkip)
 }
 
 func TestTheProviderChecks(t *testing.T) {
@@ -429,8 +426,8 @@ func TestTheProviderChecks(t *testing.T) {
 			h := newHarness(t)
 			tc.arrange(h)
 			got := h.run()
-			wantState(t, got, DoctorCodeProviderKeyMissing, tc.key)
-			wantState(t, got, DoctorCodeProviderSessionFailed, tc.session)
+			wantState(t, got, DoctorCheckProviderKey, tc.key)
+			wantState(t, got, DoctorCheckProviderSession, tc.session)
 			if tc.session == DoctorStateFail && h.session.startErr != nil && !h.session.closed.Load() {
 				t.Error("a session that failed to start was not closed")
 			}
@@ -441,7 +438,7 @@ func TestTheProviderChecks(t *testing.T) {
 func TestTheBotGatewayIsNotAskedAboutWhenTheAILegIsOff(t *testing.T) {
 	h := newHarness(t)
 	h.deps.cfg.IsBotEnabled = false
-	wantState(t, h.run(), DoctorCodeBotGatewayDown, DoctorStateSkip)
+	wantState(t, h.run(), DoctorCheckBotGateway, DoctorStateSkip)
 }
 
 // An installer matches on these, so they follow the naming spec's enum rule
@@ -449,7 +446,8 @@ func TestTheBotGatewayIsNotAskedAboutWhenTheAILegIsOff(t *testing.T) {
 func TestEveryDoctorCodeIsScreamingSnakeAndUnique(t *testing.T) {
 	screaming := regexp.MustCompile(`^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$`)
 	seen := map[DoctorCode]bool{}
-	for _, code := range doctorCodes {
+	for _, c := range doctorChecks {
+		code := c.code
 		if !screaming.MatchString(string(code)) {
 			t.Errorf("%q is not SCREAMING_SNAKE_CASE", code)
 		}
@@ -472,6 +470,29 @@ func TestEveryDoctorCodeIsScreamingSnakeAndUnique(t *testing.T) {
 	}
 }
 
+// Every result carries its check's name, in every state, so the names are
+// stable lower_snake and free of the switch's own vocabulary too.
+func TestEveryDoctorCheckIsLowerSnakeAndUnique(t *testing.T) {
+	lowerSnake := regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
+	seen := map[DoctorCheck]bool{}
+	for _, c := range doctorChecks {
+		if !lowerSnake.MatchString(string(c.check)) {
+			t.Errorf("%q is not lower_snake_case", c.check)
+		}
+		for _, upstream := range []string{"esl", "sofia", "freeswitch", "fs"} {
+			for _, word := range strings.Split(string(c.check), "_") {
+				if word == upstream {
+					t.Errorf("%q carries the upstream token %s", c.check, upstream)
+				}
+			}
+		}
+		if seen[c.check] {
+			t.Errorf("%q is listed twice", c.check)
+		}
+		seen[c.check] = true
+	}
+}
+
 func TestTheReadyzURLFollowsTheOpsListener(t *testing.T) {
 	cases := map[string]string{
 		":9090":          "http://127.0.0.1:9090/readyz",
@@ -488,24 +509,45 @@ func TestTheReadyzURLFollowsTheOpsListener(t *testing.T) {
 	}
 }
 
-func TestAFailurePrintsItsFixOnTheNextLine(t *testing.T) {
+func TestACodeIsPrintedOnlyOnAFailure(t *testing.T) {
+	results := []doctorResult{
+		pass(DoctorCheckApp, "the app is ready"),
+		fail(DoctorCheckSwitchLink, "the app has no link to the switch", "start the switch"),
+		skip(DoctorCheckExternalIP, "neither FS_EXTERNAL_IP nor --external-ip is set"),
+	}
 	var buf bytes.Buffer
-	err := printDoctor(&buf, []doctorResult{
-		pass(DoctorCodeAppNotReady, "the app is ready"),
-		fail(DoctorCodeSwitchDown, "the app has no link to the switch", "start the switch"),
-		skip(DoctorCodeMediaPortUnreachable, "no --media-port given"),
-	}, false)
-	if err != nil {
+	if err := printDoctor(&buf, results, false); err != nil {
 		t.Fatal(err)
 	}
-	want := "PASS APP_NOT_READY the app is ready\n" +
-		"FAIL SWITCH_DOWN the app has no link to the switch\n" +
-		"     fix: start the switch\n" +
-		"SKIP MEDIA_PORT_UNREACHABLE no --media-port given\n"
+	want := "PASS  app                     the app is ready\n" +
+		"FAIL  switch_link             SWITCH_DOWN  the app has no link to the switch\n" +
+		"      fix: start the switch\n" +
+		"SKIP  external_ip             neither FS_EXTERNAL_IP nor --external-ip is set\n"
 	if buf.String() != want {
 		t.Errorf("got\n%s\nwant\n%s", buf.String(), want)
 	}
-	if n := countFailed([]doctorResult{fail(DoctorCodeSwitchDown, "", "x"), skip(DoctorCodeDBSchemaNewer, "")}); n != 1 {
+
+	buf.Reset()
+	if err := printDoctor(&buf, results, true); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Results []map[string]string `json:"results"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := []map[string]string{
+		{"check": "app", "state": "PASS", "message": "the app is ready"},
+		{"check": "switch_link", "state": "FAIL", "message": "the app has no link to the switch",
+			"code": "SWITCH_DOWN", "fix": "start the switch"},
+		{"check": "external_ip", "state": "SKIP", "message": "neither FS_EXTERNAL_IP nor --external-ip is set"},
+	}
+	if !reflect.DeepEqual(doc.Results, wantJSON) {
+		t.Errorf("JSON results = %v, want %v", doc.Results, wantJSON)
+	}
+
+	if n := countFailed([]doctorResult{fail(DoctorCheckSwitchLink, "", "x"), skip(DoctorCheckSchema, "")}); n != 1 {
 		t.Errorf("countFailed = %d, want 1 — a SKIP is not a failure", n)
 	}
 }
