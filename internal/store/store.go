@@ -9,11 +9,13 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+	"github.com/pressly/goose/v3/database"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/flow"
 	"github.com/rasonyang/ai-native-callcenter/internal/store/queries"
@@ -92,6 +94,69 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
 	return nil
+}
+
+// MigrationState is where the database's schema stands against the
+// migrations embedded in this binary.
+type MigrationState struct {
+	// DBVersion is the highest version the database records as applied; 0
+	// when it has never been migrated.
+	DBVersion int64
+	// LatestVersion is the highest migration this binary carries.
+	LatestVersion int64
+	// HasPending is whether this binary has a migration the database lacks.
+	HasPending bool
+}
+
+// MigrationStatus reports the schema version without changing anything.
+//
+// It is what `aicc doctor` asks, so it must be safe against a database that a
+// running server owns, and against one nobody has migrated yet. The goose
+// Provider's GetVersions and HasPending are not safe on their own for the
+// second case: both create goose_db_version when it is missing (v3.27.3,
+// Provider.initialize → ensureVersionTable). So the table's existence is
+// asked first, through goose's own query, and the Provider is only consulted
+// once there is a table for it to read — at which point it writes nothing.
+func (s *Store) MigrationStatus(ctx context.Context) (MigrationState, error) {
+	migrations, err := fs.Sub(migrationFS, "migrations")
+	if err != nil {
+		return MigrationState{}, fmt.Errorf("migrations directory: %w", err)
+	}
+	db := stdlib.OpenDBFromPool(s.Pool)
+	defer db.Close()
+
+	p, err := goose.NewProvider(goose.DialectPostgres, db, migrations,
+		goose.WithDisableGlobalRegistry(true))
+	if err != nil {
+		return MigrationState{}, fmt.Errorf("read migrations: %w", err)
+	}
+	sources := p.ListSources()
+	state := MigrationState{LatestVersion: sources[len(sources)-1].Version}
+
+	versions, err := database.NewStore(database.DialectPostgres, goose.DefaultTablename)
+	if err != nil {
+		return MigrationState{}, fmt.Errorf("version store: %w", err)
+	}
+	lookup, ok := versions.(database.StoreExtender)
+	if !ok {
+		return MigrationState{}, errors.New("version store cannot look for its own table")
+	}
+	exists, err := lookup.TableExists(ctx, db)
+	if err != nil {
+		return MigrationState{}, fmt.Errorf("look for the version table: %w", err)
+	}
+	if !exists {
+		state.HasPending = true
+		return state, nil
+	}
+
+	if state.DBVersion, _, err = p.GetVersions(ctx); err != nil {
+		return MigrationState{}, fmt.Errorf("read schema version: %w", err)
+	}
+	if state.HasPending, err = p.HasPending(ctx); err != nil {
+		return MigrationState{}, fmt.Errorf("compare schema version: %w", err)
+	}
+	return state, nil
 }
 
 // ErrInstanceLocked reports that another instance holds the advisory lock.

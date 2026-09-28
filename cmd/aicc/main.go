@@ -361,9 +361,14 @@ func run() error {
 		// No WriteTimeout: the event stream is long-lived.
 		IdleTimeout: 120 * time.Second,
 	}
+	readiness := httpapi.Readiness{
+		Ping:       st.Pool.Ping,
+		IsSwitchUp: link.IsUp,
+		Migrations: st.MigrationStatus,
+	}
 	metricsSrv := &http.Server{
 		Addr:              cfg.MetricsAddr,
-		Handler:           httpapi.MetricsHandler(providers.MetricsHandler, func() error { return st.Pool.Ping(ctx) }),
+		Handler:           httpapi.MetricsHandler(providers.MetricsHandler, readiness),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

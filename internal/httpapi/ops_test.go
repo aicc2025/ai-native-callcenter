@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/rasonyang/ai-native-callcenter/internal/store"
+)
+
+// readyz is read by `aicc doctor` as well as by container probes, so its body
+// is a contract of its own: the lines below are what an installer parses.
+
+func readyz(t *testing.T, ready Readiness) (int, string) {
+	t.Helper()
+	h := MetricsHandler(http.NotFoundHandler(), ready)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	body, _ := io.ReadAll(rec.Body)
+	return rec.Code, string(body)
+}
+
+func migrationsAt(db, latest int64) func(context.Context) (store.MigrationState, error) {
+	return func(context.Context) (store.MigrationState, error) {
+		return store.MigrationState{DBVersion: db, LatestVersion: latest}, nil
+	}
+}
+
+func TestReadyReportsEachDependencyOnItsOwnLine(t *testing.T) {
+	code, body := readyz(t, Readiness{
+		Ping:       func(context.Context) error { return nil },
+		IsSwitchUp: func() bool { return true },
+		Migrations: migrationsAt(33, 33),
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status %d, want 200", code)
+	}
+	want := "ready\ndatabase: ok\nswitch: up\nmigrations: 33/33\n"
+	if body != want {
+		t.Fatalf("body %q, want %q", body, want)
+	}
+}
+
+// The switch being down is reported and does not fail the probe: the API
+// still serves, and restarting the app would not bring the switch back.
+func TestASwitchThatIsDownIsReportedButStillReady(t *testing.T) {
+	code, body := readyz(t, Readiness{
+		Ping:       func(context.Context) error { return nil },
+		IsSwitchUp: func() bool { return false },
+		Migrations: migrationsAt(32, 33),
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status %d, want 200", code)
+	}
+	want := "ready\ndatabase: ok\nswitch: down\nmigrations: 32/33\n"
+	if body != want {
+		t.Fatalf("body %q, want %q", body, want)
+	}
+}
+
+func TestADatabaseThatDoesNotAnswerIsNotReady(t *testing.T) {
+	asked := false
+	code, body := readyz(t, Readiness{
+		// A multi-line error must not add lines of its own.
+		Ping:       func(context.Context) error { return errors.New("dial tcp:\nconnection refused") },
+		IsSwitchUp: func() bool { return true },
+		Migrations: func(context.Context) (store.MigrationState, error) {
+			asked = true
+			return store.MigrationState{}, nil
+		},
+	})
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", code)
+	}
+	want := "dial tcp: connection refused\ndatabase: dial tcp: connection refused\nswitch: up\nmigrations: unknown\n"
+	if body != want {
+		t.Fatalf("body %q, want %q", body, want)
+	}
+	if asked {
+		t.Fatal("asked an unreachable database for its schema version")
+	}
+}
+
+func TestAMigrationStatusItCannotReadIsUnknown(t *testing.T) {
+	code, body := readyz(t, Readiness{
+		Ping:       func(context.Context) error { return nil },
+		IsSwitchUp: func() bool { return true },
+		Migrations: func(context.Context) (store.MigrationState, error) {
+			return store.MigrationState{}, errors.New("permission denied")
+		},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status %d, want 200", code)
+	}
+	want := "ready\ndatabase: ok\nswitch: up\nmigrations: unknown\n"
+	if body != want {
+		t.Fatalf("body %q, want %q", body, want)
+	}
+}
