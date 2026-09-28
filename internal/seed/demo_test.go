@@ -47,7 +47,12 @@ func quietLog() *slog.Logger {
 
 func seedDemo(t *testing.T, st *store.Store) {
 	t.Helper()
-	if err := Demo(context.Background(), st, quietLog()); err != nil {
+	seedDemoWith(t, st, DefaultPassword)
+}
+
+func seedDemoWith(t *testing.T, st *store.Store, password string) {
+	t.Helper()
+	if err := Demo(context.Background(), st, quietLog(), password); err != nil {
 		t.Fatalf("Demo() error = %v", err)
 	}
 }
@@ -68,7 +73,7 @@ func TestEverySeededAccountSignsIn(t *testing.T) {
 			if string(user.Role) != p.role {
 				t.Errorf("role = %s, want %s", user.Role, p.role)
 			}
-			ok, err := auth.VerifyPassword(demoPassword, user.PasswordHash)
+			ok, err := auth.VerifyPassword(DefaultPassword, user.PasswordHash)
 			if err != nil || !ok {
 				t.Errorf("the documented password does not open %q (ok=%v err=%v)",
 					p.username, ok, err)
@@ -157,10 +162,11 @@ func TestSeedingTwiceChangesNothing(t *testing.T) {
 	}
 }
 
-// A password that drifted — somebody reset it, an old demo had another one —
-// is the case the seeder used to walk past, leaving an account nobody could
-// open and no way to fix it but SQL. Running the seed is that way.
-func TestSeedingResetsAPasswordThatDrifted(t *testing.T) {
+// An account that already exists keeps its password and its role. The seed runs
+// on every boot, so an operator who changed a password, or promoted somebody,
+// would otherwise have it undone by the next restart (owner decision D,
+// 2026-09-28, which reversed the reset-on-every-seed rule).
+func TestSeedingLeavesAnExistingPasswordAndRoleAlone(t *testing.T) {
 	st := seededStore(t)
 	seedDemo(t, st)
 	ctx := context.Background()
@@ -173,6 +179,10 @@ func TestSeedingResetsAPasswordThatDrifted(t *testing.T) {
 	if err := svc.SetPassword(ctx, user.ID, "somebody-elses-password"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Pool.Exec(ctx,
+		`UPDATE users SET role = 'SUPERVISOR' WHERE id = $1`, user.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	seedDemo(t, st)
 
@@ -180,9 +190,45 @@ func TestSeedingResetsAPasswordThatDrifted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok, err := auth.VerifyPassword(demoPassword, user.PasswordHash)
+	ok, err := auth.VerifyPassword("somebody-elses-password", user.PasswordHash)
 	if err != nil || !ok {
-		t.Errorf("the seed did not restore the documented password (ok=%v err=%v)", ok, err)
+		t.Errorf("the seed replaced the operator's password (ok=%v err=%v)", ok, err)
+	}
+	if string(user.Role) != "SUPERVISOR" {
+		t.Errorf("role = %s after seeding again, want the operator's SUPERVISOR", user.Role)
+	}
+}
+
+// AICC_SEED_PASSWORD is the one password a deployment names: it opens every
+// seeded account and registers every seeded extension.
+func TestSeedPasswordOpensAccountsAndExtensions(t *testing.T) {
+	const password = "not-the-default-1"
+	st := seededStore(t)
+	seedDemoWith(t, st, password)
+	ctx := context.Background()
+
+	for _, p := range demoPeople {
+		t.Run(p.username, func(t *testing.T) {
+			user, err := st.Queries.GetUserByUsername(ctx, p.username)
+			if err != nil {
+				t.Fatalf("no account %q after seeding: %v", p.username, err)
+			}
+			ok, err := auth.VerifyPassword(password, user.PasswordHash)
+			if err != nil || !ok {
+				t.Errorf("AICC_SEED_PASSWORD does not open %q (ok=%v err=%v)", p.username, ok, err)
+			}
+			if p.ext == "" {
+				return
+			}
+			var extPassword string
+			if err := st.Pool.QueryRow(ctx,
+				`SELECT password FROM extensions WHERE number = $1`, p.ext).Scan(&extPassword); err != nil {
+				t.Fatalf("no extension %s after seeding: %v", p.ext, err)
+			}
+			if extPassword != password {
+				t.Errorf("extension %s password = %q, want %q", p.ext, extPassword, password)
+			}
+		})
 	}
 }
 

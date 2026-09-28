@@ -32,10 +32,11 @@ var flowFiles embed.FS
 // prngSeed pins the whole history: same seed, same rows, every install.
 const prngSeed = 20260814
 
-// demoPassword is the documented password of every seeded account and of the
-// SIP extensions behind them — a softphone that cannot register is not a demo,
-// and neither is an account nobody can sign in to. One password for both, so
-// there is one thing to remember and one thing to change.
+// DefaultPassword is the documented password the demo gives every account and
+// every SIP extension it creates when AICC_SEED_PASSWORD is unset — a softphone
+// that cannot register is not a demo, and neither is an account nobody can
+// sign in to. One password for both, so there is one thing to remember and one
+// thing to change. internal/config carries the same default.
 //
 // The dataset only exists where AICC_SEED=demo was set deliberately, and the
 // deployment doc says in as many words that it must not be a public host.
@@ -43,7 +44,7 @@ const prngSeed = 20260814
 // Shortened from aicc@12345 on 2026-09-12 (owner directive): a newcomer should
 // have as little to configure and as little to type as possible, and eight
 // characters is the floor auth.CreateUser enforces.
-const demoPassword = "aicc@123"
+const DefaultPassword = "aicc@123"
 
 // demoFlows are the bundled flows the demo publishes, each behind one number
 // per language plus a toll-free one. Every bundled flow carries English and
@@ -163,9 +164,11 @@ func queueForLanguage(language string) string {
 
 // Demo seeds the demo dataset. Existing data always wins: entities are
 // inserted with on-conflict-do-nothing on their natural keys, and the
-// history is generated only into an empty ledger.
-func Demo(ctx context.Context, st *store.Store, log *slog.Logger) error {
-	agents, queues, err := ensureEntities(ctx, st, log)
+// history is generated only into an empty ledger. password is what the
+// accounts and extensions it creates sign in and register with
+// (AICC_SEED_PASSWORD); the caller has checked it against the auth floor.
+func Demo(ctx context.Context, st *store.Store, log *slog.Logger, password string) error {
+	agents, queues, err := ensureEntities(ctx, st, log, password)
 	if err != nil {
 		return fmt.Errorf("seed entities: %w", err)
 	}
@@ -269,8 +272,8 @@ type QueueRef struct {
 
 // ensureEntities creates the demo team and queues where they do not already
 // exist, and returns whatever agents and queues the database ends up with.
-func ensureEntities(ctx context.Context, st *store.Store, log *slog.Logger) ([]uuid.UUID, []QueueRef, error) {
-	demoHash, err := auth.HashPassword(demoPassword)
+func ensureEntities(ctx context.Context, st *store.Store, log *slog.Logger, password string) ([]uuid.UUID, []QueueRef, error) {
+	demoHash, err := auth.HashPassword(password)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -280,18 +283,16 @@ func ensureEntities(ctx context.Context, st *store.Store, log *slog.Logger) ([]u
 	// role-gated, so a demo with agents only hides most of the screens.
 	for _, p := range demoPeople {
 		userID := uuid.New()
-		// The password and the role are *reset* on every seed, which is the
-		// one place this seeder overrules existing data (owner directive
-		// 2026-08-19). A demo account whose password drifted is a demo
-		// nobody can open, and "run the seed" is the answer an operator
-		// should get. The display name is left alone: it is theirs.
+		// An account that already exists keeps its password and its role,
+		// like every other seeded row: the seed runs on every boot, and an
+		// operator who changed a password must not have it put back. Until
+		// owner decision D (2026-09-28, one-line installer) the seed reset
+		// both on every run (directive of 2026-08-19); a deployment now names
+		// its own password in AICC_SEED_PASSWORD instead.
 		if _, err := st.Pool.Exec(ctx, `
 			INSERT INTO users (id, username, password_hash, display_name, role)
 			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (username) DO UPDATE
-			SET password_hash = excluded.password_hash,
-			    role          = excluded.role,
-			    updated_at    = now()`,
+			ON CONFLICT (username) DO NOTHING`,
 			userID, p.username, demoHash, p.display, p.role); err != nil {
 			return nil, nil, err
 		}
@@ -302,7 +303,7 @@ func ensureEntities(ctx context.Context, st *store.Store, log *slog.Logger) ([]u
 			INSERT INTO extensions (id, number, password, display_name)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (number) DO NOTHING`,
-			uuid.New(), p.ext, demoPassword, p.display); err != nil {
+			uuid.New(), p.ext, password, p.display); err != nil {
 			return nil, nil, err
 		}
 		if _, err := st.Pool.Exec(ctx, `

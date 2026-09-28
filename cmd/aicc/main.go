@@ -126,7 +126,7 @@ func run() error {
 
 	switch cfg.Seed {
 	case "demo":
-		if err := seed.Demo(ctx, st, slog.Default()); err != nil {
+		if err := seed.Demo(ctx, st, slog.Default(), cfg.SeedPassword); err != nil {
 			return fmt.Errorf("seed demo data: %w", err)
 		}
 	case "fresh":

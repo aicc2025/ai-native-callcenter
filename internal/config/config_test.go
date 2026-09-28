@@ -31,6 +31,9 @@ func TestLoadDefaults(t *testing.T) {
 	if low, high, err := c.QueuePool(); err != nil || low != 7000 || high != 7999 {
 		t.Errorf("QueuePool() = %d, %d, %v — want the documented 7000-7999", low, high, err)
 	}
+	if c.SeedPassword != "aicc@123" {
+		t.Errorf("SeedPassword = %q, want the documented aicc@123", c.SeedPassword)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -109,9 +112,23 @@ func TestValidate(t *testing.T) {
 			wantErr: "AICC_EXTENSION_RANGE",
 		},
 		{
+			// The seed hashes it for accounts that must pass the same floor
+			// auth.CreateUser enforces.
+			name: "short seed password",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "short"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			// Only the demo seed reads it, so nothing else is refused over it.
+			name: "short seed password without the demo seed",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", SeedPassword: "short"},
+		},
+		{
 			name: "valid",
 			cfg: Config{Env: "prod", DatabaseURL: "x", DatabaseMaxConns: 4, SessionTTL: time.Hour,
-				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo"},
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc@123"},
 		},
 	}
 

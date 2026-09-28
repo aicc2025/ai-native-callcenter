@@ -177,6 +177,9 @@ type Config struct {
 	WebhookFailedRetentionDays    int
 
 	Seed string // "" | "demo" | "fresh"
+	// SeedPassword is what the demo seed gives the accounts and the static
+	// extensions it creates. Rows that already exist keep their own.
+	SeedPassword string
 }
 
 // ExtensionPool is the inclusive number range agent phones are allocated from.
@@ -265,6 +268,7 @@ func Load() (Config, error) {
 		WebhookDeliveredRetentionDays: envInt("AICC_WEBHOOK_RETENTION_DELIVERED_DAYS", 7),
 		WebhookFailedRetentionDays:    envInt("AICC_WEBHOOK_RETENTION_FAILED_DAYS", 30),
 		Seed:                          env("AICC_SEED", ""),
+		SeedPassword:                  env("AICC_SEED_PASSWORD", "aicc@123"),
 	}
 
 	// The phone's view of the switch derives from the switch's own domain
@@ -279,6 +283,10 @@ func Load() (Config, error) {
 
 	return c, c.validate()
 }
+
+// minPasswordLength mirrors the floor internal/auth enforces on every account
+// password; config does not import auth.
+const minPasswordLength = 8
 
 func (c Config) validate() error {
 	var errs []error
@@ -367,6 +375,15 @@ func (c Config) validate() error {
 	case "", "demo", "fresh":
 	default:
 		errs = append(errs, fmt.Errorf("AICC_SEED must be empty, demo or fresh, got %q", c.Seed))
+	}
+	// Checked at startup rather than at the first insert: the seed hashes it
+	// for accounts, and eight characters is the floor auth.CreateUser and
+	// auth.SetPassword enforce, so a shorter one would seed accounts nobody
+	// could set that password on again.
+	if c.Seed == "demo" && len(c.SeedPassword) < minPasswordLength {
+		errs = append(errs, fmt.Errorf(
+			"AICC_SEED_PASSWORD must be at least %d characters when AICC_SEED=demo, got %d",
+			minPasswordLength, len(c.SeedPassword)))
 	}
 	return errors.Join(errs...)
 }
