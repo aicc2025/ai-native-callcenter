@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Config is the complete runtime configuration of the application.
@@ -438,7 +439,33 @@ func (c Config) validate() error {
 			"AICC_SEED_PASSWORD must be at least %d characters when AICC_SEED=demo, got %d",
 			minPasswordLength, len(c.SeedPassword)))
 	}
+	// Not only when the demo seed runs: the stack hands the same value to the
+	// switch as its default_password whatever AICC_SEED says, and there it is
+	// expanded into an XML attribute (deploy/freeswitch/directory/customers.xml)
+	// through the entrypoint's set_var, which refuses a double quote outright.
+	// An & or < makes the directory fail to parse; a quote or whitespace ends
+	// the value early. Any of them presents as phones that cannot register.
+	if bad, ok := unsafeSwitchPasswordRune(c.SeedPassword); ok {
+		errs = append(errs, fmt.Errorf(
+			"AICC_SEED_PASSWORD must not contain %q: the switch expands it into an XML "+
+				"attribute, so & < > \" ' whitespace and control characters are refused", bad))
+	}
 	return errors.Join(errs...)
+}
+
+// unsafeSwitchPasswordRune finds the first character that cannot survive being
+// written into the switch's XML configuration as an attribute value.
+func unsafeSwitchPasswordRune(password string) (rune, bool) {
+	for _, r := range password {
+		switch {
+		case strings.ContainsRune(`&<>"'`, r), unicode.IsSpace(r), unicode.IsControl(r):
+			return r, true
+		case r == unicode.ReplacementChar:
+			// Not valid UTF-8, which no XML parser accepts either.
+			return r, true
+		}
+	}
+	return 0, false
 }
 
 // IsDev reports whether the process runs in development mode.

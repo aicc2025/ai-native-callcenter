@@ -179,6 +179,83 @@ func TestValidate(t *testing.T) {
 				BotAllowedPeers: "10.130.0.0/24, 192.168.31.300"},
 			wantErr: "AICC_BOT_ALLOWED_PEERS",
 		},
+		// The switch expands the seed password into an XML attribute. These
+		// would break its directory or be cut short on the way there.
+		{
+			name: "seed password with ampersand",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc&1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with less than",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc<1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with greater than",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc>1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with double quote",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc\"1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with single quote",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc'1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with space",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc 1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with tab",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc\t1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with newline",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc1234\n"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with control",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc\x001234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			name: "seed password with invalid utf-8",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo", SeedPassword: "aicc\xff1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			// The stack gives the switch this value whether or not the demo
+			// seed runs, so the characters are checked either way.
+			name: "seed password with an ampersand without the demo seed",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", SeedPassword: "aicc&1234"},
+			wantErr: "AICC_SEED_PASSWORD",
+		},
+		{
+			// Punctuation XML carries as-is, and non-ASCII letters, are fine.
+			name: "seed password with safe punctuation",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999", Seed: "demo",
+				SeedPassword: "aicc@123!#$%*+-=?^_~,.;:/|()[]{}密码"},
+		},
 		{
 			name: "valid",
 			cfg: Config{Env: "prod", DatabaseURL: "x", DatabaseMaxConns: 4, SessionTTL: time.Hour,
