@@ -64,6 +64,51 @@ func TestLoadOverrides(t *testing.T) {
 	}
 }
 
+func TestParsePeers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		raw     string
+		want    string // the parsed prefixes, space-separated
+		wantErr bool
+	}{
+		{raw: "", want: ""},
+		{raw: " , ", want: ""},
+		{raw: "192.168.31.55", want: "192.168.31.55/32"},
+		{raw: "10.130.0.0/24,127.0.0.1", want: "10.130.0.0/24 127.0.0.1/32"},
+		{raw: " 10.130.0.0/24 , 127.0.0.1 ,", want: "10.130.0.0/24 127.0.0.1/32"},
+		// Host bits are dropped, not refused: the network is what was meant.
+		{raw: "10.130.0.7/24", want: "10.130.0.0/24"},
+		{raw: "::ffff:10.0.0.1", want: "10.0.0.1/32"},
+		{raw: "fd00::/8", want: "fd00::/8"},
+		{raw: "10.130.0.0/33", wantErr: true},
+		{raw: "10.130.0.0/", wantErr: true},
+		{raw: "192.168.31.300", wantErr: true},
+		{raw: "switch.local", wantErr: true},
+		{raw: "10.0.0.1-10.0.0.9", wantErr: true},
+		{raw: "fe80::1%en0", wantErr: true},
+	}
+	for _, tt := range tests {
+		prefixes, err := parsePeers(tt.raw)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("parsePeers(%q) = %v, want an error", tt.raw, prefixes)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parsePeers(%q) error = %v", tt.raw, err)
+			continue
+		}
+		got := make([]string, len(prefixes))
+		for i, p := range prefixes {
+			got[i] = p.String()
+		}
+		if strings.Join(got, " ") != tt.want {
+			t.Errorf("parsePeers(%q) = %v, want %s", tt.raw, got, tt.want)
+		}
+	}
+}
+
 func TestValidate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -124,6 +169,15 @@ func TestValidate(t *testing.T) {
 			name: "short seed password without the demo seed",
 			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
 				ExtensionRange: "1000-1999", QueueRange: "7000-7999", SeedPassword: "short"},
+		},
+		{
+			// A list with a typo in it is refused whole: the rest of it would
+			// otherwise be enforced without the entry that named the switch.
+			name: "bad bot allowed peers",
+			cfg: Config{Env: "dev", DatabaseURL: "x", DatabaseMaxConns: 1, SessionTTL: time.Hour,
+				ExtensionRange: "1000-1999", QueueRange: "7000-7999",
+				BotAllowedPeers: "10.130.0.0/24, 192.168.31.300"},
+			wantErr: "AICC_BOT_ALLOWED_PEERS",
 		},
 		{
 			name: "valid",

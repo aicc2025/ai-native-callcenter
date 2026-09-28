@@ -234,9 +234,12 @@ func (s *RTCPSession) sendGoodbye() {
 func (s *RTCPSession) receiveLoop() {
 	buf := make([]byte, 4096)
 	for s.running.Load() {
-		n, _, err := s.conn.ReadFromUDP(buf)
+		n, from, err := s.conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			return // closed
+		}
+		if !s.rtp.allowed.allows(from.Addr()) {
+			continue
 		}
 		packets, err := rtcp.Unmarshal(buf[:n])
 		if err != nil {

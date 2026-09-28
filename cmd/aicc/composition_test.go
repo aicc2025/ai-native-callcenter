@@ -555,7 +555,7 @@ func TestEveryBotDependencyIsPlumbed(t *testing.T) {
 	cfg := botConfig(
 		botUAS(config.Config{BotSIPHost: "127.0.0.1", BotSIPPort: 6060,
 			BotAdvertiseIP: "127.0.0.1", BotRTPPortLow: 40000, BotRTPPortHigh: 40999,
-			BotMaxCalls: 10}),
+			BotMaxCalls: 10, BotAllowedPeers: "127.0.0.1"}),
 		&catalog.Service{},
 		&store.FlowStore{},
 		&telephony.Adapter{},

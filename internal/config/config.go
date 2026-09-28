@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -51,6 +52,18 @@ type Config struct {
 	// gateway; the RTP range sits clear of the switch's own.
 	BotSIPHost string
 	BotSIPPort int
+	// BotAllowedPeers lists the addresses, comma-separated IPs or CIDRs, that
+	// may send SIP to the bot and RTP to its calls; everything else is
+	// dropped unanswered. Empty allows every peer.
+	//
+	// Empty is the default because no fixed list is both safe and right for
+	// every shape this runs in. The switch reaches the bot from the host's LAN
+	// address on a native install and in host networking, and from a compose
+	// network's address in the stack; "private ranges" would admit all of
+	// them and with them the whole LAN the list exists to keep out, and a host
+	// whose own address is public would be refused. A deployment that exposes
+	// the bot's ports names its switch here. Parsed by BotAllowedPeerPrefixes.
+	BotAllowedPeers string
 	// BotAdvertiseIP overrides route probing in SDP answers; empty probes.
 	BotAdvertiseIP string
 	BotRTPPortLow  int
@@ -192,6 +205,39 @@ func (c Config) QueuePool() (low, high int, err error) {
 	return parseRange(c.QueueRange)
 }
 
+// BotAllowedPeerPrefixes is AICC_BOT_ALLOWED_PEERS parsed. Empty means every
+// peer is allowed.
+func (c Config) BotAllowedPeerPrefixes() ([]netip.Prefix, error) {
+	return parsePeers(c.BotAllowedPeers)
+}
+
+// parsePeers reads a comma-separated list of IP addresses and CIDR prefixes. A
+// bare address is the single host.
+func parsePeers(raw string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	for item := range strings.SplitSeq(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if strings.Contains(item, "/") {
+			prefix, err := netip.ParsePrefix(item)
+			if err != nil {
+				return nil, fmt.Errorf("%q is not an IP address or CIDR prefix", item)
+			}
+			prefixes = append(prefixes, prefix.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(item)
+		if err != nil || addr.Zone() != "" {
+			return nil, fmt.Errorf("%q is not an IP address or CIDR prefix", item)
+		}
+		addr = addr.Unmap()
+		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return prefixes, nil
+}
+
 // parseRange reads "low-high". Both ends are inclusive.
 func parseRange(raw string) (low, high int, err error) {
 	lo, hi, ok := strings.Cut(raw, "-")
@@ -227,6 +273,7 @@ func Load() (Config, error) {
 		SIPWSSURL:        env("AICC_SIP_WSS_URL", ""),
 		BotSIPHost:       env("AICC_BOT_SIP_HOST", "0.0.0.0"),
 		BotSIPPort:       envInt("AICC_BOT_SIP_PORT", 6060),
+		BotAllowedPeers:  env("AICC_BOT_ALLOWED_PEERS", ""),
 		BotAdvertiseIP:   env("AICC_BOT_ADVERTISE_IP", ""),
 		BotRTPPortLow:    envInt("AICC_BOT_RTP_PORT_LOW", 40000),
 		BotRTPPortHigh:   envInt("AICC_BOT_RTP_PORT_HIGH", 40999),
@@ -361,6 +408,12 @@ func (c Config) validate() error {
 		errs = append(errs, fmt.Errorf("AICC_QUEUE_RANGE must start at 1 or above, got %d", low))
 	} else if high < low {
 		errs = append(errs, fmt.Errorf("AICC_QUEUE_RANGE ends before it starts (%d-%d)", low, high))
+	}
+	// Refused rather than skipped: dropping the entry that did not parse would
+	// leave a list that refuses the switch it was meant to name, and every bot
+	// call would fail with nothing on the switch's side to say why.
+	if _, err := c.BotAllowedPeerPrefixes(); err != nil {
+		errs = append(errs, fmt.Errorf("AICC_BOT_ALLOWED_PEERS: %w", err))
 	}
 	if c.WebhookDeliveredRetentionDays < 0 || c.WebhookFailedRetentionDays < 0 {
 		errs = append(errs, fmt.Errorf(

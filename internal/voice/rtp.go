@@ -99,7 +99,10 @@ type RTPSession struct {
 	timestamp atomic.Uint32
 	seq       uint16 // send loop only
 
-	conn       *net.UDPConn
+	conn *net.UDPConn
+	// allowed is the peer list the UAS accepts signalling from, applied to
+	// every inbound packet; empty accepts any source. Set before Start.
+	allowed    peerACL
 	remoteMu   sync.Mutex
 	remoteAddr *net.UDPAddr
 
@@ -258,9 +261,14 @@ func (r *RTPSession) Stop() {
 func (r *RTPSession) readLoop() {
 	buf := make([]byte, 2048)
 	for r.running.Load() {
-		n, _, err := r.conn.ReadFromUDP(buf)
+		n, from, err := r.conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			return // the connection was closed
+		}
+		// A port in the range is reachable by anyone who can guess it; audio
+		// from outside the peer list would otherwise be heard as the caller.
+		if !r.allowed.allows(from.Addr()) {
+			continue
 		}
 		r.handlePacket(buf[:n])
 	}
