@@ -188,6 +188,7 @@ services:
       FS_ESL_LISTEN_IP: 0.0.0.0
       FS_ESL_PORT: "18021"
       FS_ESL_PASSWORD: ${ESL_PASSWORD:-aicc@123}
+      FS_DEFAULT_PASSWORD: ${AICC_SEED_PASSWORD:-aicc@123}
       # The switch records into the shared volume the application reads.
       AICC_RECORDINGS_DIR: /usr/local/freeswitch/recordings
       # A switch told to transcribe refuses to start without mod_audio_stream.

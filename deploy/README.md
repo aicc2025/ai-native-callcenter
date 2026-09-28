@@ -188,7 +188,7 @@ is the password the seed gives the accounts and extensions it creates.
 | Accounts | `admin` (administrator), `supervisor` (supervisor), `wei` / `amy` / `ben` (agents). Password `AICC_SEED_PASSWORD` (`aicc@123`) |
 | Extensions | `amy` 1000, `wei` 1001, `ben` 1002. SIP password `AICC_SEED_PASSWORD` (`aicc@123`), readable through `GET /extensions/{id}/password`. A signed-in agent's browser phone gets its own credentials from the platform; the static password is for a hand-configured phone while nobody is signed in at that extension |
 | Queues | `support-en` on 7001 (`wei`, `amy`), `support-zh` on 7002 (`ben`) |
-| Customers | 18 numbers a SIP phone can register as: 13800000001–13800000009 and (212) 555-0101 – (212) 555-0109. Password `aicc@123`, registrar `<FS_EXTERNAL_IP>:5060`, domain `<FS_EXTERNAL_IP>`. A number is unreachable until a phone registers as it |
+| Customers | 18 numbers a SIP phone can register as: 13800000001–13800000009 and (212) 555-0101 – (212) 555-0109. Password `AICC_SEED_PASSWORD` (`aicc@123`), registrar `<FS_EXTERNAL_IP>:5060`, domain `<FS_EXTERNAL_IP>`. A number is unreachable until a phone registers as it |
 | History | Seven deterministic days of calls, queue events and presence, for the wallboard and reports |
 
 Six published bilingual flows, each on an English, a Chinese and a US number:
