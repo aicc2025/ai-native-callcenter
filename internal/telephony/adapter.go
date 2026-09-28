@@ -19,8 +19,8 @@ type Commander interface {
 }
 
 // Adapter is the complete vocabulary of commands this application sends to
-// FreeSWITCH: its methods — here and in members.go, tiers.go and
-// registrations.go — are the only code that builds a switch command string, so
+// FreeSWITCH: its methods — here and in members.go, tiers.go, registrations.go
+// and switchstatus.go — are the only code that builds a switch command string, so
 // the switch's spelling stays in one reviewable type. Callers supply only the
 // arguments; the one exception in shape is the endpoint an originate or bridge
 // dials, which internal/outbound composes (a gateway dial string and its

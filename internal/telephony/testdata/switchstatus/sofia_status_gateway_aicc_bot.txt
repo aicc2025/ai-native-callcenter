@@ -1,0 +1,27 @@
+=================================================================================================
+Name    	aicc_bot
+Profile 	external
+Scheme  	Digest
+Realm   	10.130.0.10:6060
+Username	FreeSWITCH
+Password	no
+From    	<sip:FreeSWITCH@10.130.0.10:6060>
+Contact 	<sip:gw+aicc_bot@192.168.31.111:5080;transport=udp;gw=aicc_bot>
+Exten   	FreeSWITCH
+To      	sip:FreeSWITCH@10.130.0.10:6060
+Proxy   	sip:10.130.0.10:6060
+Context 	aicc
+Expires 	3600
+Freq    	3600
+Ping    	1790560660
+PingFreq	30
+PingTime	2.65
+PingState	1/3/3
+State   	NOREG
+Status  	UP
+Uptime  	1424s
+CallsIN 	0
+CallsOUT	1
+FailedCallsIN	0
+FailedCallsOUT	0
+=================================================================================================

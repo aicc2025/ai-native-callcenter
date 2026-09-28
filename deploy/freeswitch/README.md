@@ -6,7 +6,8 @@ Two directories, both mounted read-only onto the switch by
 `deploy/docker-compose.yml`:
 
 * `directory/customers.xml` holds eighteen customer telephones any SIP softphone
-  can register as, password `aicc@123`, each carrying its own number as caller
+  can register as, password `AICC_SEED_PASSWORD` (default `aicc@123`, passed
+  to the switch as `FS_DEFAULT_PASSWORD`), each carrying its own number as caller
   id and arriving in the `public` context the way a carrier's call does.
 * `dialplan/10_simulated_pstn.xml` routes both ways: what a customer dials goes to the inbound
   doorway; what the platform dials to a customer number rings that registered

@@ -4,10 +4,14 @@ Work through this before the stack described in [the deployment guide](README.md
 faces anyone.
 
 - [ ] Change every password: PostgreSQL, `aicc_lua`, ESL, and every seeded
-      account. The defaults are published in the deployment guide.
+      account. The defaults are published in the deployment guide. The
+      one-line installer generates `POSTGRES_PASSWORD`, `ESL_PASSWORD`,
+      `LUA_PASSWORD` and `AICC_SEED_PASSWORD` into `.env`; a manual install
+      keeps the published defaults until you change them.
 - [ ] Set `AICC_SEED=` (empty) in `.env` so no demo data lands on a host others
-      can reach. If the database already has it, run once with
-      `AICC_SEED=fresh` to remove exactly what the seed created.
+      can reach. The one-line installer seeds the demo by default; install
+      with `--no-demo` for production. If the database already has it, run
+      once with `AICC_SEED=fresh` to remove exactly what the seed created.
 - [ ] Put TLS in front; this stack does not provide it. Proxy all of `/` (API,
       event stream and interface share one origin) and set
       `AICC_SECURE_COOKIES=true`, or the session cookie is never sent back.

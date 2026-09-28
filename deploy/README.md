@@ -3,14 +3,193 @@
 This stack runs the whole product on one host: PostgreSQL, FreeSWITCH and the
 application, seeded with a demo dataset.
 
-This procedure is verified on a Linux server. The switch's current
-local-network setting (`local-network-acl=aicc_sip_local` on the internal SIP
-profile) is verified only on Docker Desktop on an Intel Mac and has not been
-re-verified on a Linux host. On macOS, read
+There are two ways to install it:
+
+- [The one-line installer](#install-with-one-command) downloads a release's
+  deploy bundle, writes `.env` with generated secrets, starts the published
+  images and checks the result with `aicc doctor`. Start here.
+- [The manual compose quick start](#manual-install-with-compose) runs the same
+  stack from a git checkout. Use it to build from source, or where the
+  installer refuses the host.
+
+The platforms verified so far are listed in the
+[support matrix](../README.md#supported-platforms). On macOS, read
 [Running on macOS](#running-on-macos) first: what works depends on the
 container runtime.
 
-## Prerequisites
+## Install with one command
+
+Linux (as root, into `/opt/aicc`):
+
+```sh
+curl -fsSL https://github.com/rasonyang/ai-native-callcenter/releases/latest/download/install.sh | sudo sh
+```
+
+macOS (as yourself, into `~/.aicc`):
+
+```sh
+curl -fsSL https://github.com/rasonyang/ai-native-callcenter/releases/latest/download/install.sh | sh
+```
+
+Options go after `sh -s --`, for example
+`curl -fsSL …/install.sh | sudo sh -s -- --provider qwen --no-demo`.
+
+`releases/latest` is the latest full release. A pre-release (a tag with a
+hyphen, such as `v0.2.0-rc.1`) is never `latest`: download its own script
+from `releases/download/<tag>/install.sh`, or pass `--version <tag>`.
+
+**Before it changes anything, it checks the host.** Each failed check prints a
+stable tag (`FAIL PREFLIGHT_…`), what is wrong and the command that fixes it,
+then stops with nothing written or started. `--check` runs only these checks.
+They cover: Docker Engine 24.0.0 or later and Compose 2.24.4 or later (not the
+snap package, not rootless), on macOS Docker Desktop or Colima 0.9.0 or later
+with the `grpc` port forwarder, at least 4 CPUs and 4 GiB for the runtime,
+both images published for this host's architecture, no other stack named
+`aicc`, the stack's ports free, and on Linux an active ufw or firewalld
+allowing the stack's ports ([Ports and firewall](#ports-and-firewall)).
+
+**What it asks, and what it works out itself:**
+
+- The LAN address phones reach this host at: inferred from the default route's
+  interface, skipping loopback, link-local and TUN-proxy addresses
+  (198.18.0.0/15). Pass `--external-ip <ip>` when the inference is wrong or
+  phones reach the host through NAT.
+- The voice provider (`--provider openai|qwen|gateway|doubao|none`) and its
+  key. The key is read from the environment (`OPENAI_API_KEY`,
+  `ALIYUN_API_KEY` for qwen, `DOUBAO_API_KEY`, `REALTIME_API_KEY` plus
+  `AICC_PROVIDER_ENDPOINT` for gateway) or asked for at the terminal with the
+  input hidden. With `sudo`, keep an exported key with `sudo -E`. `none` runs
+  without a bot: calls to the bot numbers go to their queues.
+- Secrets: `POSTGRES_PASSWORD`, `ESL_PASSWORD`, `LUA_PASSWORD` and
+  `AICC_SEED_PASSWORD` are generated (32 random characters each) and written
+  to `<dir>/.env`, mode 0600. The installer prints the admin password once, on
+  the first install; afterwards it is `AICC_SEED_PASSWORD` in `.env`.
+
+`--yes` never prompts: it accepts confirmations and fails on any value it
+would have had to ask for.
+
+**Options:**
+
+| Option | Meaning |
+|---|---|
+| `--provider P` | `openai`, `qwen`, `gateway`, `doubao` or `none`. Only a first install chooses; later runs keep what `.env` names |
+| `--external-ip IP` | The address phones reach this host at. On a rerun, rewrites the address in `.env` |
+| `--version TAG` | The release to install. Default: the release the script came from |
+| `--no-demo` | Do not seed the demo dataset (`AICC_SEED` empty). Use it for production |
+| `--upgrade` | Back up the database, then move an install to `--version` |
+| `--uninstall` | Stop and remove the containers; keep the data volumes, `.env` and backups |
+| `--purge` | With `--uninstall`: also delete the data volumes and the install directory |
+| `--check` | Run the preflight checks only; change nothing |
+| `--install-docker` | Linux: install Docker Engine with `get.docker.com` first (you confirm after it is downloaded) |
+| `--yes`, `-y` | Never prompt |
+
+**Where it installs.** `/opt/aicc` on Linux (run as root), `~/.aicc` on macOS
+(run as yourself, never as root). The directory holds the release's compose
+files and mounted configuration, `VERSION`, `.env` and, after an upgrade,
+`backups/`. Linux uses `compose.linux.yml` (host networking), macOS
+`compose.macos.yml` (one shared network namespace); `COMPOSE_FILE` in `.env`
+names them, so plain `docker compose …` in that directory addresses the stack.
+
+**Running it again.**
+
+- **Rerun** (same command): repairs or restarts the install. It adds only the
+  keys `.env` lacks, never regenerates a secret, and leaves unchanged
+  containers alone. A rerun never changes the address: if the host's address
+  moved, it warns and `aicc doctor` fails with `EXTERNAL_IP_NOT_ON_HOST`.
+- **`--external-ip <ip>`**: writes the new address into `.env` and recreates
+  what depends on it.
+- **`--upgrade`**, run with the new release's script or with
+  `--version <tag>`: writes a `pg_dump` of the database to
+  `<dir>/backups/aicc-<old tag>-<time>.dump` first, then installs the new
+  bundle and images; the application migrates at startup. It refuses a
+  downgrade: migrations are forward-only.
+- **`--uninstall`**: removes the containers and keeps the data volumes, `.env`
+  and `backups/`; rerunning the installer starts the same data again.
+- **`--uninstall --purge`**: also deletes the data volumes and the install
+  directory, after a confirmation.
+
+### aicc doctor
+
+The installer ends by running `aicc doctor` inside the application container.
+Run it again at any time:
+
+```sh
+cd /opt/aicc && docker compose exec aicc aicc doctor --host-addrs <ip>   # ~/.aicc on macOS
+```
+
+`--host-addrs` is the host's address (comma-separated if several); on macOS
+the container cannot see the Mac's interfaces, so without it the address check
+is judged against the wrong host. Each line is `PASS`, `FAIL` or `SKIP`, the
+check's name and a message; a `FAIL` also carries a code and a `fix:` line. The
+exit status is 1 if and only if a check failed. `--skip-provider` leaves out
+the provider session; `--json` prints the results as JSON.
+
+| Check | Code on failure |
+|---|---|
+| `app` | `APP_NOT_READY` |
+| `switch_link` | `SWITCH_DOWN` |
+| `database` | `DB_UNREACHABLE` |
+| `migrations` | `DB_MIGRATIONS_PENDING` |
+| `schema` | `DB_SCHEMA_NEWER` |
+| `switch_reachable` | `SWITCH_UNREACHABLE` |
+| `switch_auth` | `SWITCH_AUTH_REJECTED` |
+| `sip_profiles` | `SWITCH_PROFILE_DOWN` |
+| `bot_gateway` | `BOT_GATEWAY_DOWN` |
+| `external_ip` | `EXTERNAL_IP_NOT_ON_HOST` |
+| `external_ip_advertised` | `EXTERNAL_IP_STALE` |
+| `provider_key` | `PROVIDER_KEY_MISSING` |
+| `provider_session` | `PROVIDER_SESSION_FAILED` |
+
+### Next: an agent's browser phone
+
+1. Install the web-sip-phone extension from the
+   [Chrome Web Store](https://chromewebstore.google.com/detail/dkhaojcfjdcdpldokeokajkmambkbacp).
+2. In the extension, add the host's address (`<ip>`) to its Allow Sites.
+3. Open `http://<ip>:8080` and sign in as an agent (`wei`, `amy` or `ben`;
+   the password is `AICC_SEED_PASSWORD` in `.env`).
+4. Press **Sign in** on the phone bar. The agent's device counts as registered
+   only after this ([#37](https://github.com/rasonyang/ai-native-callcenter/issues/37)).
+5. Dial `95001` (English) or `95002` (Chinese) to reach the bot.
+
+### Ports and firewall
+
+| Overlay | Switch media (RTP) | Bot media | How ports reach the stack |
+|---|---|---|---|
+| `compose.linux.yml` (installer, Linux) | `16384-29999/udp` | `30000-30999/udp`, bot SIP `6060` | Host networking: the switch and the application bind the host's addresses; nothing is published |
+| `compose.macos.yml` (installer, macOS) | `16384-16583/udp` (100 RTP/RTCP pairs) | not published | The `netns` container publishes 8080/tcp, 5060/udp+tcp, 5066/tcp and the RTP range |
+| none (manual quick start) | `16384-16484/udp` | not published | Published by the switch and application containers |
+
+`RTP_START` and `RTP_END` in `.env` move the switch's range; on macOS each
+published port costs a forwarder in the VM, so widen it with care.
+
+On Linux with an active ufw or firewalld, the preflight fails with
+`PREFLIGHT_FIREWALL` until these are allowed (and prints the exact commands):
+`8080/tcp`, `5060/tcp`, `5060/udp`, `5066/tcp`, `5080/tcp`, `5080/udp`,
+`7443/tcp` and the RTP range `16384-29999/udp`. For ufw:
+
+```sh
+for r in 8080/tcp 5060/tcp 5060/udp 5066/tcp 5080/tcp 5080/udp 7443/tcp 16384:29999/udp; do sudo ufw allow "$r"; done
+```
+
+For firewalld:
+
+```sh
+sudo firewall-cmd --permanent --add-port=8080/tcp --add-port=5060/tcp --add-port=5060/udp \
+    --add-port=5066/tcp --add-port=5080/tcp --add-port=5080/udp --add-port=7443/tcp \
+    --add-port=16384-29999/udp && sudo firewall-cmd --reload
+```
+
+The bot's ports (6060, `30000-30999/udp`) need no rule: only the switch on the
+same host sends to them, and the application accepts SIP, RTP and RTCP only
+from the addresses in `AICC_BOT_ALLOWED_PEERS` (loopback and `FS_LOCAL_IP`).
+The [production checklist](production-checklist.md) covers narrowing SIP and
+RTP to the phones that need them.
+
+## Manual install with compose
+
+The fallback: the same stack from a git checkout, without the installer.
+
+### Prerequisites
 
 - A Linux host with [Docker Engine](https://docs.docker.com/engine/install/)
   and the Compose plugin, v2 or later (`docker compose version` works). On
@@ -18,7 +197,7 @@ container runtime.
 - A Qwen key (`ALIYUN_API_KEY`), or an OpenAI key outside mainland China.
 - The address phones use to reach this host.
 
-## Quick start
+### Quick start
 
 **1. Get the stack and copy the example config.**
 
@@ -122,30 +301,35 @@ for. On a bot number the bot leg ends after 5 s without caller audio and the
 caller is moved to the number's fallback queue
 ([Troubleshooting](#troubleshooting)).
 
-### Docker Desktop
-
-Verified on an Intel Mac with Docker Desktop, softphones on the same Mac.
-
-In `deploy/.env`:
-
-```ini
-FS_EXTERNAL_IP=<the Mac's own LAN address>
-```
-
-Then follow the quick start from step 4. Phones register at
-`<FS_EXTERNAL_IP>:5060` over UDP, and the web interface is at
-`http://<FS_EXTERNAL_IP>:8080`.
-
-- Phones on other hosts are not verified with Docker Desktop.
-- `sofia status profile internal reg` shows a Docker gateway address as the
-  phone's `IP` (`10.130.0.1` or `192.168.65.1`). That is expected here.
+The one-line installer uses `compose.macos.yml` on macOS: a placeholder
+container, `netns`, owns one network namespace on the compose network and
+publishes every port (8080/tcp, 5060/udp+tcp, 5066/tcp and the RTP range
+`16384-16583/udp`, 200 ports); the application and the switch join it. The
+installer supports Docker Desktop and Colima; OrbStack, Podman and Rancher
+Desktop are refused (`PREFLIGHT_RUNTIME_UNSUPPORTED`).
 
 ### Colima
 
-Colima by default forwards only TCP ports to the Mac. SIP over UDP and all
-media (`16384-16484/udp`) never reach the switch; a UDP registration fails with
-`503`. Give the VM its own address and point phones at it. Verified with Colima
-on Apple silicon:
+Colima's default `ssh` port forwarder forwards TCP only: SIP over UDP and all
+media never reach the switch. The `grpc` port forwarder forwards UDP too. It
+needs Colima 0.9.0 or later (the `--port-forwarder` flag); 0.10.3 is the
+oldest version verified ([support matrix](../README.md#supported-platforms)).
+Start the VM with it, with at least 4 CPUs and 4 GiB:
+
+```sh
+colima start --port-forwarder grpc --cpu 4 --memory 4
+```
+
+The installer refuses a profile with the `ssh` forwarder
+(`PREFLIGHT_COLIMA_PORT_FORWARDER`), with too few resources
+(`PREFLIGHT_RESOURCES`), or started with `--network-address`
+(`PREFLIGHT_COLIMA_NETWORK_ADDRESS`); each failure prints the `colima stop`
+and `colima start` line that fixes it. Phones register at the Mac's LAN
+address.
+
+**Manual only: a VM address instead of port forwarding.** With the manual
+compose quick start (not with the installer, which refuses it), the VM can get
+its own address and phones point at it:
 
 ```sh
 colima start --vm-type vz --network-address
@@ -165,29 +349,47 @@ phone's real address, as on a Linux host.
 
 - If the profile already runs without `--network-address`, run `colima stop`,
   then the `colima start` line above.
-- The Mac's own address still forwards TCP ports, including `5060/tcp`, but
-  not the UDP media. A phone registered there has no audio. Use the VM address
-  only.
 - The VM address is on a network shared between the Mac and its VMs. Only
   softphones on the same Mac can reach it. Phones on other hosts need the VM
   bridged onto the LAN (Colima `--network-mode bridged`, which requires
   `socket_vmnet`); this is not verified.
+
+### Docker Desktop
+
+The installer supports Docker Desktop (Settings > Resources: at least 4 CPUs
+and 4 GB of memory), but an installer run on Docker Desktop is not yet
+verified live. An earlier manual setup was verified on an Intel Mac with
+Docker Desktop and softphones on the same Mac. For the manual quick start, in
+`deploy/.env`:
+
+```ini
+FS_EXTERNAL_IP=<the Mac's own LAN address>
+```
+
+Then follow the quick start from step 4. Phones register at
+`<FS_EXTERNAL_IP>:5060` over UDP, and the web interface is at
+`http://<FS_EXTERNAL_IP>:8080`.
+
+- Phones on other hosts are not verified with Docker Desktop.
+- `sofia status profile internal reg` shows a Docker gateway address as the
+  phone's `IP` (`10.130.0.1` or `192.168.65.1`). That is expected here.
 
 For phones on other hosts, or for anything beyond a trial, run the stack on a
 Linux host or a Linux VM with a bridged network adapter.
 
 ## Demo data
 
-`AICC_SEED` defaults to `demo`, so the first start fills an empty database. On
-every boot the seeded accounts get their password and role reset; nothing else
-is touched.
+`AICC_SEED` defaults to `demo`, so the first start fills an empty database.
+Later boots add only what is missing: an account or extension that already
+exists keeps its password and role. `AICC_SEED_PASSWORD` (default `aicc@123`)
+is the password the seed gives the accounts and extensions it creates.
 
 | | |
 |---|---|
-| Accounts | `admin` (administrator), `supervisor` (supervisor), `wei` / `amy` / `ben` (agents). Password `aicc@123` |
-| Extensions | `amy` 1000, `wei` 1001, `ben` 1002. SIP password `aicc@123`, readable through `GET /extensions/{id}/password`. A signed-in agent's browser phone gets its own credentials from the platform; the static password is for a hand-configured phone while nobody is signed in at that extension |
+| Accounts | `admin` (administrator), `supervisor` (supervisor), `wei` / `amy` / `ben` (agents). Password `AICC_SEED_PASSWORD` (`aicc@123`) |
+| Extensions | `amy` 1000, `wei` 1001, `ben` 1002. SIP password `AICC_SEED_PASSWORD` (`aicc@123`), readable through `GET /extensions/{id}/password`. A signed-in agent's browser phone gets its own credentials from the platform; the static password is for a hand-configured phone while nobody is signed in at that extension |
 | Queues | `support-en` on 7001 (`wei`, `amy`), `support-zh` on 7002 (`ben`) |
-| Customers | 18 numbers a SIP phone can register as: 13800000001–13800000009 and (212) 555-0101 – (212) 555-0109. Password `aicc@123`, registrar `<FS_EXTERNAL_IP>:5060`, domain `<FS_EXTERNAL_IP>`. A number is unreachable until a phone registers as it |
+| Customers | 18 numbers a SIP phone can register as: 13800000001–13800000009 and (212) 555-0101 – (212) 555-0109. Password `AICC_SEED_PASSWORD` (`aicc@123`), registrar `<FS_EXTERNAL_IP>:5060`, domain `<FS_EXTERNAL_IP>`. A number is unreachable until a phone registers as it |
 | History | Seven deterministic days of calls, queue events and presence, for the wallboard and reports |
 
 Six published bilingual flows, each on an English, a Chinese and a US number:
@@ -400,7 +602,9 @@ See [the provider notes](../docs/provider-extension.md).
 
 ## Upgrading
 
-First move the checkout to the new release tag, because compose mounts files
+An install made by the one-line installer upgrades with `--upgrade`
+([Running it again](#install-with-one-command)). For a manual install, first
+move the checkout to the new release tag, because compose mounts files
 from it:
 
 ```sh
@@ -450,6 +654,14 @@ hand instead of pulling it.
 - **`… API_KEY is not set` in the logs.** The key is not in the container's
   environment. Put it in `deploy/.env` and run `docker compose up -d`
   (`restart` is not enough).
+- **The browser phone registers to an old deployment, or cannot register
+  after moving to a new one.** The extension keeps registering to a previous
+  deployment that used the same extension number
+  ([#38](https://github.com/rasonyang/ai-native-callcenter/issues/38)), and
+  Sign Out / Clear Account does not drop a credential the platform provisioned
+  ([rasonyang/web-sip-phone#13](https://github.com/rasonyang/web-sip-phone/issues/13)).
+  Remove the old deployment's host from the extension's Allow Sites, then sign
+  in again on the new one.
 - **A `401` or a failed handshake.** The provider rejected the key: it is wrong,
   or not enabled for the realtime model shown in the `voice provider selected`
   log line.

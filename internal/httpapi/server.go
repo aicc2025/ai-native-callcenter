@@ -4,7 +4,9 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -412,22 +414,70 @@ func (s *Server) router() chi.Router {
 	return r
 }
 
+// Readiness is what the ops listener's /readyz asks of the process.
+//
+// Only Ping decides the status code. The switch link and the schema version
+// are reported beside it, one "name: value" line each, so an installer or an
+// operator can read why a deployment is unhealthy without the probe that
+// restarts containers acting on it: an app whose switch is down still serves
+// its API, and restarting it would not bring the switch back.
+type Readiness struct {
+	Ping       func(context.Context) error
+	IsSwitchUp func() bool
+	Migrations func(context.Context) (store.MigrationState, error)
+}
+
+// readyzTimeout bounds one readiness report, so a wedged database answers the
+// probe with 503 instead of holding it open.
+const readyzTimeout = 3 * time.Second
+
 // MetricsHandler builds the unauthenticated ops listener: metrics, liveness
 // and readiness. It is served on a separate address.
-func MetricsHandler(metrics http.Handler, ready func() error) http.Handler {
+//
+// The /readyz body is plain text with stable lines, which `aicc doctor` reads:
+//
+//	ready                  (or the database error)
+//	database: ok           (or the database error)
+//	switch: up|down
+//	migrations: <db>/<latest>  (or "unknown")
+func MetricsHandler(metrics http.Handler, ready Readiness) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", metrics)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if err := ready(); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), readyzTimeout)
+		defer cancel()
+
+		status, head, database := http.StatusOK, "ready", "ok"
+		if err := ready.Ping(ctx); err != nil {
+			status, head = http.StatusServiceUnavailable, oneLine(err)
+			database = head
 		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ready\n"))
+		sw := "down"
+		if ready.IsSwitchUp() {
+			sw = "up"
+		}
+		migrations := "unknown"
+		if status == http.StatusOK {
+			if m, err := ready.Migrations(ctx); err == nil {
+				migrations = fmt.Sprintf("%d/%d", m.DBVersion, m.LatestVersion)
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, "%s\ndatabase: %s\nswitch: %s\nmigrations: %s\n",
+			head, database, sw, migrations)
 	})
 	return mux
+}
+
+// oneLine keeps an error on the line it is reported on, so it cannot forge
+// one of the lines after it.
+func oneLine(err error) string {
+	return strings.Join(strings.Fields(err.Error()), " ")
 }

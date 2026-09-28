@@ -423,6 +423,9 @@ func botUAS(cfg config.Config) voice.Config {
 	uas := voice.DefaultConfig()
 	uas.SIPHost = cfg.BotSIPHost
 	uas.SIPPort = cfg.BotSIPPort
+	// Validated when the configuration was loaded, so a list that does not
+	// parse never reaches here.
+	uas.AllowedPeers, _ = cfg.BotAllowedPeerPrefixes()
 	uas.AdvertiseIP = cfg.BotAdvertiseIP
 	uas.RTPPortRange = [2]int{cfg.BotRTPPortLow, cfg.BotRTPPortHigh}
 	uas.MaxCalls = cfg.BotMaxCalls

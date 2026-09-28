@@ -24,6 +24,35 @@ STACK := deploy/docker-compose.yml
 stack-up: ## Start the whole product on this machine, seeded
 	docker compose -f $(STACK) up -d
 
+.PHONY: stack-config
+stack-config: ## Validate the stack's compose files: the base, each overlay, and the stamped release overlay
+	@set -euo pipefail; \
+	export FS_EXTERNAL_IP=192.0.2.10 FS_LOCAL_IP=192.0.2.10; \
+	rel=$$(mktemp -d)/compose.release.yml; \
+	trap 'rm -rf "$$(dirname "$$rel")"' EXIT; \
+	sed 's/@TAG@/v0.0.0/g' deploy/compose.release.yml.in > "$$rel"; \
+	for os in "" deploy/compose.linux.yml deploy/compose.macos.yml; do \
+	  for r in "" "$$rel"; do \
+	    echo "compose config: $(STACK)$${r:+ + release}$${os:+ + $$os}"; \
+	    docker compose -f $(STACK) $${r:+-f "$$r"} $${os:+-f "$$os"} config -q; \
+	  done; \
+	done
+
+.PHONY: installer-check
+installer-check: ## Check the one-line installer: shellcheck, its unit tests, the compose files, a dry release bundle
+	@command -v shellcheck >/dev/null 2>&1 || { \
+	  echo "installer-check: shellcheck is not installed (apt-get install shellcheck, or brew install shellcheck)" >&2; \
+	  exit 1; }
+	shellcheck -s sh deploy/install.sh deploy/install_test.sh scripts/release-bundle.sh deploy/postgres/lua-role.sh
+	sh deploy/install_test.sh
+	$(MAKE) stack-config
+	@set -euo pipefail; \
+	out=$$(mktemp -d); \
+	trap 'rm -rf "$$out"' EXIT; \
+	scripts/release-bundle.sh v0.0.0-check "$$out"; \
+	cd "$$out"; \
+	if command -v sha256sum >/dev/null 2>&1; then sha256sum -c checksums.txt; else shasum -a 256 -c checksums.txt; fi
+
 .PHONY: stack-down
 stack-down: ## Stop the stack (add ARGS=-v to discard its data)
 	docker compose -f $(STACK) down $(ARGS)

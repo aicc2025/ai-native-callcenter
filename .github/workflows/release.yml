@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Cutting a release: two container images under one tag, and that is the release.
+# Cutting a release: two container images under one tag, and three files on
+# the GitHub release of that tag, and that is the release.
 #
 #   git tag -a v0.1.0 -m "…" && git push origin v0.1.0
 #
@@ -13,6 +14,17 @@
 # tag. A deployment names both in `AICC_IMAGE` / `AICC_FS_IMAGE` and pulls;
 # `deploy/README.md` is that procedure.
 #
+# The GitHub release carries what the one-line installer downloads, built by
+# `scripts/release-bundle.sh <tag>`: `install.sh` (deploy/install.sh with the
+# tag stamped in place of @RELEASE_TAG@), `aicc-deploy-<tag>.tar.gz` (the files
+# the stack mounts, with compose.release.yml stamped from
+# compose.release.yml.in) and `checksums.txt` (sha256 of both). The committed
+# files keep their placeholders; the deploy-tags job refuses a hand-stamped one.
+# The one-liner, `curl -fsSL <repo>/releases/latest/download/install.sh | sh`,
+# resolves to the latest full release: GitHub's `releases/latest` skips
+# pre-releases, so a pre-release is installed with its own URL
+# (`releases/download/<tag>/install.sh`) or with `--version <tag>`.
+#
 # Before tagging, name the tag everywhere the deploy-tags job checks: the
 # AICC_FS_IMAGE default in deploy/docker-compose.yml, both image tags in
 # deploy/README.md and deploy/.env.example, and the `git clone --branch <tag>`
@@ -22,7 +34,8 @@
 # `rasonyang/ai-native-callcenter:v0.1.0`, `rasonyang/freeswitch-aicc:v0.1.0`.
 # No `latest`, no floating `0.1`, no v-stripped alias: a deployment names the
 # build it runs, and a tag that moves cannot be named. A `workflow_dispatch` run
-# builds both images but pushes nothing.
+# builds both images but pushes nothing; it builds the installer bundle under a
+# dry-run tag and uploads it as a workflow artifact, never to a release.
 #
 # Credentials: both images go to Docker Hub, so the repository needs
 # `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (an access token with Read & Write,
@@ -33,7 +46,8 @@
 # for a manual build; a release does not use it.
 #
 # Pre-releases: a tag whose name contains a hyphen (`v0.1.0-rc.1`) is marked as a
-# pre-release on GitHub; a plain `v0.1.0` is a full release.
+# pre-release on GitHub; a plain `v0.1.0` is a full release. Only a full release
+# becomes `releases/latest`, which the one-liner installs.
 #
 # Notes: the release body comes from `scripts/release-notes.sh <tag>` — the
 # CHANGELOG.md section for the tag when there is one, otherwise the commit
@@ -61,6 +75,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # scripts/release-bundle.sh stamps the tag into copies of these two
+      # files. A committed file already carrying a tag would ship that tag
+      # under every later release, so the placeholders must still be there.
+      - name: Check the installer's placeholders are unstamped
+        run: |
+          failed=0
+          if ! grep -qF "@RELEASE_TAG@" deploy/install.sh; then
+            echo "::error file=deploy/install.sh::deploy/install.sh must keep AICC_RELEASE='@RELEASE_TAG@'; scripts/release-bundle.sh stamps the tag, never a commit"
+            failed=1
+          fi
+          if ! grep -qF "@TAG@" deploy/compose.release.yml.in; then
+            echo "::error file=deploy/compose.release.yml.in::deploy/compose.release.yml.in must keep its @TAG@ placeholders; scripts/release-bundle.sh stamps the tag, never a commit"
+            failed=1
+          fi
+          exit "$failed"
 
       - name: Check deploy/ names this release
         if: github.ref_type == 'tag'
@@ -267,6 +297,30 @@ jobs:
             fi
           done
 
+  # A dispatch run's installer bundle: built as a release would build it, under
+  # a tag no release carries, and kept as a workflow artifact only.
+  bundle-dry-run:
+    name: bundle-dry-run
+    needs: [deploy-tags]
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the installer bundle
+        run: scripts/release-bundle.sh "v0.0.0-dryrun+${GITHUB_SHA::12}" "${RUNNER_TEMP}/assets"
+
+      - name: Verify the checksums
+        working-directory: ${{ runner.temp }}/assets
+        run: sha256sum -c checksums.txt
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: installer-bundle
+          path: ${{ runner.temp }}/assets/*
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: publish
     needs: [image, switch-manifest]
@@ -283,12 +337,24 @@ jobs:
       - name: Release notes
         run: scripts/release-notes.sh "${GITHUB_REF_NAME}" > "${RUNNER_TEMP}/release-notes.md"
 
-      # No files: the release is the two images, and this is the note that
-      # names them.
+      # What the one-line installer downloads: install.sh with this tag stamped
+      # in, the deploy bundle, and their checksums.
+      - name: Installer bundle
+        run: |
+          scripts/release-bundle.sh "${GITHUB_REF_NAME}" "${RUNNER_TEMP}/assets"
+          (cd "${RUNNER_TEMP}/assets" && sha256sum -c checksums.txt)
+
+      # The release is the two images, which the notes name, and the three
+      # installer files attached here.
       - uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           body_path: ${{ runner.temp }}/release-notes.md
+          files: |
+            ${{ runner.temp }}/assets/install.sh
+            ${{ runner.temp }}/assets/aicc-deploy-${{ github.ref_name }}.tar.gz
+            ${{ runner.temp }}/assets/checksums.txt
+          fail_on_unmatched_files: true
           # A hyphen in the tag is a pre-release: v0.1.0-rc.1, v0.2.0-beta.2.
           prerelease: ${{ contains(github.ref_name, '-') }}

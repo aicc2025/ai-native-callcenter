@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Linux overlay: the application and the switch on the host's own network.
+#
+#   docker compose -f docker-compose.yml -f compose.linux.yml up -d
+#
+# or COMPOSE_FILE=docker-compose.yml:compose.linux.yml in .env. Needs Compose
+# 2.24.4 or later for !reset.
+#
+# On a bridge network every published port costs a proxy process and every
+# phone arrives from the bridge's gateway address. With host networking the
+# switch binds the host's LAN address itself, sees each phone's real address,
+# and needs no port published, so the media range can be as wide as the
+# traffic. PostgreSQL and the one-shot lua-role stay on the bridge; PostgreSQL
+# is published on loopback only, for the two host-networked services.
+#
+# FS_LOCAL_IP is required: the host's LAN address, which the switch binds SIP
+# and RTP to and dials the bot at. The switch's own detection picks the
+# interface of the default route, and on a host running a TUN proxy (mihomo's
+# Meta at 198.18.0.1, for one) that is the tunnel, not the LAN.
+#
+# Host ports this stack takes. Check them before starting on a shared host:
+#   aicc        ${HTTP_BIND}:${HTTP_PORT} (8080/tcp); 127.0.0.1:9090 metrics;
+#               127.0.0.1:8090 audio-stream ingest; 6060 bot SIP;
+#               30000-30999/udp bot RTP
+#   freeswitch  5060 udp+tcp (internal), 5080 udp+tcp (external), 5066/tcp ws,
+#               7443/tcp wss, 127.0.0.1:18021 event socket,
+#               ${RTP_START}-${RTP_END}/udp media (16384-29999)
+#   postgres    127.0.0.1:${PG_HOST_PORT} (15432)
+# The two RTP ranges sit below Linux's ephemeral port range (32768-60999), so
+# an outgoing connection's local port never takes one of them.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${PG_HOST_PORT:-15432}:5432"
+
+  aicc:
+    network_mode: host
+    networks: !reset null
+    ports: !reset []
+    environment:
+      AICC_DATABASE_URL: "host=127.0.0.1 port=${PG_HOST_PORT:-15432} dbname=aicc user=aicc password='${POSTGRES_PASSWORD:-aicc@123}' sslmode=disable"
+      # The switch shares this network namespace, so the event socket stays on
+      # loopback and is reachable from nowhere else.
+      AICC_ESL_ADDR: 127.0.0.1:18021
+      AICC_HTTP_ADDR: ${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-8080}
+      # No authentication of its own, so loopback only.
+      AICC_METRICS_ADDR: 127.0.0.1:9090
+      # The bot's SIP and RTP ports are on the host's interfaces now, so only
+      # the switch may send to them: it dials from FS_LOCAL_IP.
+      AICC_BOT_ALLOWED_PEERS: 127.0.0.1,${FS_LOCAL_IP:?set FS_LOCAL_IP in .env to this host's LAN address}
+      # Route probing could answer with a TUN proxy's address; the switch sends
+      # to the LAN address it dialled.
+      AICC_BOT_ADVERTISE_IP: ${FS_LOCAL_IP:?set FS_LOCAL_IP in .env to this host's LAN address}
+      AICC_BOT_RTP_PORT_LOW: "30000"
+      AICC_BOT_RTP_PORT_HIGH: "30999"
+
+  freeswitch:
+    network_mode: host
+    ports: !reset []
+    environment:
+      AICC_LUA_DSN: "pgsql://host=127.0.0.1 port=${PG_HOST_PORT:-15432} dbname=aicc user=aicc_lua password='${LUA_PASSWORD:-aicc@123}'"
+      AICC_CC_DSN: "pgsql://host=127.0.0.1 port=${PG_HOST_PORT:-15432} dbname=aicc_fs user=aicc password='${POSTGRES_PASSWORD:-aicc@123}'"
+      FS_CALLCENTER_DSN: "pgsql://host=127.0.0.1 port=${PG_HOST_PORT:-15432} dbname=aicc_fs user=aicc password='${POSTGRES_PASSWORD:-aicc@123}'"
+      FS_LOCAL_IP: ${FS_LOCAL_IP:?set FS_LOCAL_IP in .env to this host's LAN address}
+      # The bot runs on this host's network too. Its LAN address, never
+      # loopback: sofia binds FS_LOCAL_IP and cannot send to 127.0.0.1 from it.
+      AICC_BOT_HOST: ${FS_LOCAL_IP:?set FS_LOCAL_IP in .env to this host's LAN address}
+      FS_ESL_LISTEN_IP: 127.0.0.1
+      FS_RTP_START_PORT: ${RTP_START:-16384}
+      FS_RTP_END_PORT: ${RTP_END:-29999}

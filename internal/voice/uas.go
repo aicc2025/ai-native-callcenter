@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,10 @@ type Config struct {
 	// of the switch's bot gateway.
 	SIPHost string
 	SIPPort int
+	// AllowedPeers are the addresses allowed to send SIP to the bot and RTP to
+	// its calls. Empty allows every peer. Anything else is dropped before it is
+	// parsed: no response, no dialog, no port, no provider session.
+	AllowedPeers []netip.Prefix
 	// AdvertiseIP is the address written into SDP answers. Empty means probe
 	// the route towards the peer's media address, which is the only thing that
 	// works when the listener is bound to every interface.
@@ -248,6 +253,8 @@ type UAS struct {
 
 	conn      *net.UDPConn
 	localPort int
+	allowed   peerACL
+	denied    deniedPeerLog
 
 	mu          sync.Mutex
 	isRunning   bool
@@ -267,6 +274,8 @@ func NewUAS(cfg Config) *UAS {
 	return &UAS{
 		cfg:         cfg,
 		log:         cfg.Logger,
+		allowed:     peerACL(slices.Clone(cfg.AllowedPeers)),
+		denied:      deniedPeerLog{log: cfg.Logger},
 		dialogs:     map[string]*Dialog{},
 		ackTimers:   map[string]*time.Timer{},
 		answerTimer: map[string]*time.Timer{},
@@ -291,8 +300,12 @@ func (u *UAS) Start() error {
 	u.mu.Unlock()
 
 	go u.readLoop()
+	allowedPeers := "any"
+	if len(u.allowed) > 0 {
+		allowedPeers = fmt.Sprint(u.cfg.AllowedPeers)
+	}
 	u.log.Info("sip uas started", "host", u.cfg.SIPHost, "port", u.localPort,
-		"maxCalls", u.cfg.MaxCalls)
+		"maxCalls", u.cfg.MaxCalls, "allowedPeers", allowedPeers)
 	return nil
 }
 
@@ -383,6 +396,14 @@ func (u *UAS) allocateRTPPort() (int, error) {
 	return 0, fmt.Errorf("no RTP ports available in %d-%d", low, high)
 }
 
+// newRTPSession prepares a call's media, accepting it only from the peers the
+// signalling is accepted from.
+func (u *UAS) newRTPSession(port int, law media.Law, dtmfPayloadType int) *RTPSession {
+	session := NewRTPSession(port, law, dtmfPayloadType, u.log)
+	session.allowed = u.allowed
+	return session
+}
+
 func (u *UAS) releaseRTPPort(port int) {
 	u.mu.Lock()
 	delete(u.usedPorts, port)
@@ -424,6 +445,16 @@ func (u *UAS) readLoop() {
 		n, addr, err := u.conn.ReadFromUDP(buf)
 		if err != nil {
 			return // closed
+		}
+		// Checked before anything else, including parsing. A peer outside the
+		// list gets silence rather than a 403, whatever it sent — OPTIONS
+		// included: a UDP source address is forgeable, so any answer could be
+		// aimed at a third party, and a scanner that hears nothing learns
+		// nothing about what listens here. A switch that was left out finds
+		// its gateway marked down, and the WARN names the address to add.
+		if from := addr.AddrPort(); !u.allowed.allows(from.Addr()) {
+			u.denied.report(from, requestName(buf[:n]))
+			continue
 		}
 		data := make([]byte, n)
 		copy(data, buf[:n])
@@ -538,7 +569,7 @@ func (u *UAS) handleInvite(msg *sipMessage, addr *net.UDPAddr) {
 		LocalRTPPort:  localRTPPort,
 		LocalIP:       localIP,
 		LocalSIPPort:  u.localPort,
-		RTP:           NewRTPSession(localRTPPort, law, dtmfPayloadType, u.log),
+		RTP:           u.newRTPSession(localRTPPort, law, dtmfPayloadType),
 		Stopped:       make(chan struct{}),
 		rtcpInterval:  u.cfg.RTCPInterval,
 		log:           u.log,

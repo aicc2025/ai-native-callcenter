@@ -10,11 +10,13 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Config is the complete runtime configuration of the application.
@@ -51,6 +53,18 @@ type Config struct {
 	// gateway; the RTP range sits clear of the switch's own.
 	BotSIPHost string
 	BotSIPPort int
+	// BotAllowedPeers lists the addresses, comma-separated IPs or CIDRs, that
+	// may send SIP to the bot and RTP to its calls; everything else is
+	// dropped unanswered. Empty allows every peer.
+	//
+	// Empty is the default because no fixed list is both safe and right for
+	// every shape this runs in. The switch reaches the bot from the host's LAN
+	// address on a native install and in host networking, and from a compose
+	// network's address in the stack; "private ranges" would admit all of
+	// them and with them the whole LAN the list exists to keep out, and a host
+	// whose own address is public would be refused. A deployment that exposes
+	// the bot's ports names its switch here. Parsed by BotAllowedPeerPrefixes.
+	BotAllowedPeers string
 	// BotAdvertiseIP overrides route probing in SDP answers; empty probes.
 	BotAdvertiseIP string
 	BotRTPPortLow  int
@@ -177,6 +191,9 @@ type Config struct {
 	WebhookFailedRetentionDays    int
 
 	Seed string // "" | "demo" | "fresh"
+	// SeedPassword is what the demo seed gives the accounts and the static
+	// extensions it creates. Rows that already exist keep their own.
+	SeedPassword string
 }
 
 // ExtensionPool is the inclusive number range agent phones are allocated from.
@@ -187,6 +204,39 @@ func (c Config) ExtensionPool() (low, high int, err error) {
 // QueuePool is the inclusive number range queues are allocated from.
 func (c Config) QueuePool() (low, high int, err error) {
 	return parseRange(c.QueueRange)
+}
+
+// BotAllowedPeerPrefixes is AICC_BOT_ALLOWED_PEERS parsed. Empty means every
+// peer is allowed.
+func (c Config) BotAllowedPeerPrefixes() ([]netip.Prefix, error) {
+	return parsePeers(c.BotAllowedPeers)
+}
+
+// parsePeers reads a comma-separated list of IP addresses and CIDR prefixes. A
+// bare address is the single host.
+func parsePeers(raw string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	for item := range strings.SplitSeq(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if strings.Contains(item, "/") {
+			prefix, err := netip.ParsePrefix(item)
+			if err != nil {
+				return nil, fmt.Errorf("%q is not an IP address or CIDR prefix", item)
+			}
+			prefixes = append(prefixes, prefix.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(item)
+		if err != nil || addr.Zone() != "" {
+			return nil, fmt.Errorf("%q is not an IP address or CIDR prefix", item)
+		}
+		addr = addr.Unmap()
+		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return prefixes, nil
 }
 
 // parseRange reads "low-high". Both ends are inclusive.
@@ -224,6 +274,7 @@ func Load() (Config, error) {
 		SIPWSSURL:        env("AICC_SIP_WSS_URL", ""),
 		BotSIPHost:       env("AICC_BOT_SIP_HOST", "0.0.0.0"),
 		BotSIPPort:       envInt("AICC_BOT_SIP_PORT", 6060),
+		BotAllowedPeers:  env("AICC_BOT_ALLOWED_PEERS", ""),
 		BotAdvertiseIP:   env("AICC_BOT_ADVERTISE_IP", ""),
 		BotRTPPortLow:    envInt("AICC_BOT_RTP_PORT_LOW", 40000),
 		BotRTPPortHigh:   envInt("AICC_BOT_RTP_PORT_HIGH", 40999),
@@ -265,6 +316,7 @@ func Load() (Config, error) {
 		WebhookDeliveredRetentionDays: envInt("AICC_WEBHOOK_RETENTION_DELIVERED_DAYS", 7),
 		WebhookFailedRetentionDays:    envInt("AICC_WEBHOOK_RETENTION_FAILED_DAYS", 30),
 		Seed:                          env("AICC_SEED", ""),
+		SeedPassword:                  env("AICC_SEED_PASSWORD", "aicc@123"),
 	}
 
 	// The phone's view of the switch derives from the switch's own domain
@@ -279,6 +331,10 @@ func Load() (Config, error) {
 
 	return c, c.validate()
 }
+
+// minPasswordLength mirrors the floor internal/auth enforces on every account
+// password; config does not import auth.
+const minPasswordLength = 8
 
 func (c Config) validate() error {
 	var errs []error
@@ -354,6 +410,12 @@ func (c Config) validate() error {
 	} else if high < low {
 		errs = append(errs, fmt.Errorf("AICC_QUEUE_RANGE ends before it starts (%d-%d)", low, high))
 	}
+	// Refused rather than skipped: dropping the entry that did not parse would
+	// leave a list that refuses the switch it was meant to name, and every bot
+	// call would fail with nothing on the switch's side to say why.
+	if _, err := c.BotAllowedPeerPrefixes(); err != nil {
+		errs = append(errs, fmt.Errorf("AICC_BOT_ALLOWED_PEERS: %w", err))
+	}
 	if c.WebhookDeliveredRetentionDays < 0 || c.WebhookFailedRetentionDays < 0 {
 		errs = append(errs, fmt.Errorf(
 			"AICC_WEBHOOK_RETENTION_*_DAYS must be 0 or more, got %d and %d",
@@ -368,7 +430,42 @@ func (c Config) validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("AICC_SEED must be empty, demo or fresh, got %q", c.Seed))
 	}
+	// Checked at startup rather than at the first insert: the seed hashes it
+	// for accounts, and eight characters is the floor auth.CreateUser and
+	// auth.SetPassword enforce, so a shorter one would seed accounts nobody
+	// could set that password on again.
+	if c.Seed == "demo" && len(c.SeedPassword) < minPasswordLength {
+		errs = append(errs, fmt.Errorf(
+			"AICC_SEED_PASSWORD must be at least %d characters when AICC_SEED=demo, got %d",
+			minPasswordLength, len(c.SeedPassword)))
+	}
+	// Not only when the demo seed runs: the stack hands the same value to the
+	// switch as its default_password whatever AICC_SEED says, and there it is
+	// expanded into an XML attribute (deploy/freeswitch/directory/customers.xml)
+	// through the entrypoint's set_var, which refuses a double quote outright.
+	// An & or < makes the directory fail to parse; a quote or whitespace ends
+	// the value early. Any of them presents as phones that cannot register.
+	if bad, ok := unsafeSwitchPasswordRune(c.SeedPassword); ok {
+		errs = append(errs, fmt.Errorf(
+			"AICC_SEED_PASSWORD must not contain %q: the switch expands it into an XML "+
+				"attribute, so & < > \" ' whitespace and control characters are refused", bad))
+	}
 	return errors.Join(errs...)
+}
+
+// unsafeSwitchPasswordRune finds the first character that cannot survive being
+// written into the switch's XML configuration as an attribute value.
+func unsafeSwitchPasswordRune(password string) (rune, bool) {
+	for _, r := range password {
+		switch {
+		case strings.ContainsRune(`&<>"'`, r), unicode.IsSpace(r), unicode.IsControl(r):
+			return r, true
+		case r == unicode.ReplacementChar:
+			// Not valid UTF-8, which no XML parser accepts either.
+			return r, true
+		}
+	}
+	return 0, false
 }
 
 // IsDev reports whether the process runs in development mode.
