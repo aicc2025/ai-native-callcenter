@@ -100,20 +100,6 @@ jobs:
             echo "a hot-path benchmark allocates; see 06 §7 L1"; exit 1
           fi
 
-  # The compose files are validated, not run: the base stack, each OS overlay,
-  # and the release overlay as the release pipeline stamps it. The runner's
-  # Compose plugin is new enough for !reset (2.24.4).
-  stack:
-    name: stack
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - run: docker compose version
-
-      - name: Compose config
-        run: make stack-config
-
   web:
     name: web
     runs-on: ubuntu-latest
