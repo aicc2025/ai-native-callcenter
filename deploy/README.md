@@ -13,7 +13,7 @@ There are two ways to install it:
   installer refuses the host.
 
 The platforms verified so far are listed in the
-[support matrix](../README.md#supported-platforms). On macOS, read
+[support matrix](one-line-installer.md#supported-platforms). On macOS, read
 [Running on macOS](#running-on-macos) first: what works depends on the
 container runtime.
 
@@ -313,7 +313,8 @@ Desktop are refused (`PREFLIGHT_RUNTIME_UNSUPPORTED`).
 Colima's default `ssh` port forwarder forwards TCP only: SIP over UDP and all
 media never reach the switch. The `grpc` port forwarder forwards UDP too. It
 needs Colima 0.9.0 or later (the `--port-forwarder` flag); 0.10.3 is the
-oldest version verified ([support matrix](../README.md#supported-platforms)).
+oldest version verified
+([support matrix](one-line-installer.md#supported-platforms)).
 Start the VM with it, with at least 4 CPUs and 4 GiB:
 
 ```sh

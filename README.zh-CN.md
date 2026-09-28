@@ -18,38 +18,19 @@ PostgreSQL 和 FreeSWITCH。
 
 ## 先跑起来
 
-Linux 上：
+Linux：
 
 ```sh
 curl -fsSL https://github.com/rasonyang/ai-native-callcenter/releases/latest/download/install.sh | sudo sh
 ```
 
-macOS 上（Colima 或 Docker Desktop）去掉 `sudo`。安装脚本先检查主机，再询问语音服务
-商和它的密钥，把所有密码生成到 `.env` 里，启动已发布的镜像，最后用 `aicc doctor`
-检查运行中的整套服务，并打印访问地址和管理员密码。
+macOS：
 
-启动后已预置一支坐席团队、两个队列、六条已发布的双语流程（每条一个英文号码、一个中
-文号码和一个美国号码，总机是 800-555-0199）、十八部模拟客户电话，以及一周的历史数
-据，这样看板不会是空的，软电话也能立刻打给机器人。安装
-[web-sip-phone](https://chromewebstore.google.com/detail/dkhaojcfjdcdpldokeokajkmambkbacp)
-扩展，以坐席身份登录，拨打 95001（英文）或 95002（中文）。安装选项、升级、卸载以及
-手动用 compose 部署的方法见 [deploy/README.md](deploy/README.md)。
+```sh
+curl -fsSL https://github.com/rasonyang/ai-native-callcenter/releases/latest/download/install.sh | sh
+```
 
-### 已验证的平台
-
-下表只列出 2026-09-28 用本版本镜像实机验证过的组合：
-
-| 操作系统 | 架构 | 容器运行时 | 版本 | 验证内容 |
-|---|---|---|---|---|
-| Ubuntu 24.04.5 LTS | x86_64 | Docker Engine | Engine 29.8.0，Compose v5.5.1 | 安装脚本全流程（安装、重复运行、`--external-ip`、`--upgrade`、`--uninstall` / `--purge`、预检失败场景）；`aicc doctor` 全部 PASS；局域网内另一台机器上的 WebRTC 坐席（macOS 上的 Chrome 154，web-sip-phone 1.0.7）通过 `ws://` 注册，与 95001 的机器人双向通话 |
-| macOS 26.6.2 | arm64 | Colima（vz，端口转发器 `grpc`） | Colima 0.10.3，Docker 28.4.0，Compose 5.1.4 | macOS 叠加配置下的整套服务；`aicc doctor` 全部 PASS；同一主机上的 WebRTC 坐席双向通话（交换机配置来自本版本）；安装脚本只验证了预检（`--check`），macOS 上完整运行安装脚本尚未验证 |
-
-- Colima：已验证的最低版本是 0.10.3，并且必须使用 `grpc` 端口转发器
-  （`colima start --port-forwarder grpc`）；默认的 `ssh` 转发器不转发 UDP。
-- 两个镜像都发布了 `linux/amd64` 和 `linux/arm64` 版本。主机架构没有对应镜像时，安装
-  脚本的预检会直接拒绝，不会用模拟方式运行。
-- 尚未验证：Docker Desktop、Intel 芯片的 macOS 12，以及 Ubuntu 24.04 以外的 Linux
-  发行版。
+详见 [deploy/one-line-installer.md](deploy/one-line-installer.md)。
 
 ## 它做什么
 
