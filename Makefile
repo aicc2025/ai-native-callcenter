@@ -38,6 +38,21 @@ stack-config: ## Validate the stack's compose files: the base, each overlay, and
 	  done; \
 	done
 
+.PHONY: installer-check
+installer-check: ## Check the one-line installer: shellcheck, its unit tests, the compose files, a dry release bundle
+	@command -v shellcheck >/dev/null 2>&1 || { \
+	  echo "installer-check: shellcheck is not installed (apt-get install shellcheck, or brew install shellcheck)" >&2; \
+	  exit 1; }
+	shellcheck -s sh deploy/install.sh deploy/install_test.sh scripts/release-bundle.sh deploy/postgres/lua-role.sh
+	sh deploy/install_test.sh
+	$(MAKE) stack-config
+	@set -euo pipefail; \
+	out=$$(mktemp -d); \
+	trap 'rm -rf "$$out"' EXIT; \
+	scripts/release-bundle.sh v0.0.0-check "$$out"; \
+	cd "$$out"; \
+	if command -v sha256sum >/dev/null 2>&1; then sha256sum -c checksums.txt; else shasum -a 256 -c checksums.txt; fi
+
 .PHONY: stack-down
 stack-down: ## Stop the stack (add ARGS=-v to discard its data)
 	docker compose -f $(STACK) down $(ARGS)
