@@ -360,3 +360,22 @@ func TestAToolResultIsRecordedWithoutItsHint(t *testing.T) {
 		t.Errorf("a result that moved nowhere records movedTo = %v", stayed["movedTo"])
 	}
 }
+
+// A call the time limit ended says so, and is never contained: the platform,
+// not the conversation, closed it (03-data: is_contained).
+func TestACallEndedByTheTimeLimitIsNotContained(t *testing.T) {
+	ledger := newFakeLedger()
+	recorder := newCallRecorder(uuid.New(), time.Now(), nil)
+	recorder.markSessionLimit()
+	recorder.markHangup()
+
+	recorder.finish(ledger, testFacts(), discard())
+
+	cdr := ledger.cdrs[0]
+	if cdr.Status != store.CDRStatusAnswered || cdr.HangupCause != "SESSION_LIMIT" {
+		t.Errorf("status=%s cause=%s, want ANSWERED and SESSION_LIMIT", cdr.Status, cdr.HangupCause)
+	}
+	if cdr.IsContained {
+		t.Error("a call the time limit ended was marked contained")
+	}
+}

@@ -314,6 +314,21 @@ func (e *Engine) CloseAtTurnsWithoutToolWall() string {
 	return e.enter(e.spec.Global.ClosingTarget)
 }
 
+// CloseAtSessionLimit moves the call to the flow's closing target because it
+// has run out of time (Global.MaxDurationSec), returning the new phase, or an
+// empty string when there is nowhere to go — the flow has no closing target,
+// or the call is already in a terminal phase.
+func (e *Engine) CloseAtSessionLimit() string {
+	target := e.spec.Global.ClosingTarget
+	if target == "" || e.current.IsTerminal {
+		return ""
+	}
+	e.log.Warn("flow reached its time limit; closing the call",
+		"node", e.current.id, "maxDuration", e.spec.Global.MaxDuration(),
+		"target", target)
+	return e.enter(target)
+}
+
 // resetTurnsWithoutTool starts the wall's count over.
 func (e *Engine) resetTurnsWithoutTool() {
 	e.turnsWithoutTool = 0

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // SpecVersion is the dialect this package reads.
@@ -281,6 +282,14 @@ type Global struct {
 	// off, negative is refused at load, and a positive value requires
 	// ClosingTarget.
 	MaxTurnsWithoutTool int `json:"maxTurnsWithoutTool,omitempty"`
+	// MaxDurationSec is the call's time budget, counted from the moment the
+	// bot answers (02 §7). At 80% the model is told to wrap up; at 100% the
+	// engine ends the call itself: a transfer to the DID's queue when that
+	// queue is open, otherwise ClosingTarget (or a plain goodbye when there is
+	// none). Absent means DefaultMaxDurationSec; 0 turns the limit off;
+	// anything else must lie between MinMaxDurationSec and MaxMaxDurationSec.
+	// A pointer, because absent and 0 mean different things.
+	MaxDurationSec *int `json:"maxDurationSec,omitempty"`
 	// AlwaysAllowedTools are available in every phase — asking for a person,
 	// or hanging up, should never be blocked by whatever phase the caller
 	// happens to be in.
@@ -290,6 +299,24 @@ type Global struct {
 	APIBaseEnv string `json:"apiBaseEnv,omitempty"`
 	// Transitions apply in every non-terminal phase, after the node's own.
 	Transitions []Transition `json:"transitions,omitempty"`
+}
+
+// The bounds of Global.MaxDurationSec.
+const (
+	DefaultMaxDurationSec = 900
+	// MinMaxDurationSec keeps the wrap-up window (the last 20%) at twelve
+	// seconds or more, long enough for one reply.
+	MinMaxDurationSec = 60
+	MaxMaxDurationSec = 3600
+)
+
+// MaxDuration is the call's time budget; zero means the flow turned the
+// limit off.
+func (g Global) MaxDuration() time.Duration {
+	if g.MaxDurationSec == nil {
+		return DefaultMaxDurationSec * time.Second
+	}
+	return time.Duration(*g.MaxDurationSec) * time.Second
 }
 
 // Spec is one complete call flow.

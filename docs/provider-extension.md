@@ -203,6 +203,11 @@ lifetime runs out, with the caller still on the line: there is no reconnect, the
 call is released with the hangup cause `PROVIDER_SESSION_EXPIRED`, and the
 caller is rescued to the DID's fallback queue. A deployment that puts long
 conversations behind this provider wants that queue to exist.
+That lifetime (about ten minutes) is shorter than a flow's default time limit
+(`global.maxDurationSec`, 900 seconds), so on gemini the provider, not the
+flow, ends a long call — without the wrap-up. A flow meant for gemini sets
+`maxDurationSec` below the lifetime (540, say) so the platform's own limit
+comes first.
 
 One consequence of the setup-once session is worth knowing before writing a
 flow for it: a phase change cannot be pushed to the model. It rides the next

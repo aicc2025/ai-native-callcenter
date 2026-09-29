@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testFlow is a small but complete flow: identify the caller, look their
@@ -163,6 +164,18 @@ func TestLoadRejectsBrokenFlows(t *testing.T) {
 			return strings.Replace(s, `"maxTurns": 6,`,
 				`"maxTurns": 6, "maxTurnsWithoutTool": -1,`, 1)
 		}, "maxTurnsWithoutTool is -1"},
+		{"negative time limit", func(s string) string {
+			return strings.Replace(s, `"maxTurns": 6,`,
+				`"maxTurns": 6, "maxDurationSec": -1,`, 1)
+		}, "maxDurationSec is -1"},
+		{"time limit too short to wrap up in", func(s string) string {
+			return strings.Replace(s, `"maxTurns": 6,`,
+				`"maxTurns": 6, "maxDurationSec": 59,`, 1)
+		}, "maxDurationSec is 59"},
+		{"time limit past an hour", func(s string) string {
+			return strings.Replace(s, `"maxTurns": 6,`,
+				`"maxTurns": 6, "maxDurationSec": 3601,`, 1)
+		}, "maxDurationSec is 3601"},
 		{"NO_INPUT rule that names a tool", func(s string) string {
 			return strings.Replace(s, `{"on": "NO_INPUT",`,
 				`{"on": "NO_INPUT", "tool": "lookup_account",`, 1)
@@ -850,5 +863,51 @@ func TestTheFlowCarriesTheBotsVoice(t *testing.T) {
 	}
 	if loaded.Global.Voice != "cherry" {
 		t.Errorf("global.voice = %q, want cherry", loaded.Global.Voice)
+	}
+}
+
+// global.maxDurationSec: absent is the design's 900 seconds, 0 turns the limit
+// off, and the bounds themselves load.
+func TestTheTimeLimitDefaultsAndCanBeTurnedOff(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		insert string
+		want   time.Duration
+	}{
+		{"absent", "", 900 * time.Second},
+		{"off", `"maxDurationSec": 0,`, 0},
+		{"shortest", `"maxDurationSec": 60,`, time.Minute},
+		{"longest", `"maxDurationSec": 3600,`, time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec, err := Load([]byte(strings.Replace(testFlow, `"maxTurns": 6,`,
+				`"maxTurns": 6, `+tc.insert, 1)))
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got := spec.Global.MaxDuration(); got != tc.want {
+				t.Errorf("MaxDuration = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The time limit's move is the closing target, from any phase the call can
+// still leave, and nowhere when the flow has no closing target.
+func TestTheTimeLimitClosesToTheClosingTarget(t *testing.T) {
+	t.Parallel()
+	e := testEngineFor(t, testFlowWithClosing, "en")
+	if moved := e.CloseAtSessionLimit(); moved != "farewell" || !e.IsTerminal() {
+		t.Fatalf("moved to %q, want the closing target", moved)
+	}
+	if moved := e.CloseAtSessionLimit(); moved != "" {
+		t.Errorf("a terminal phase moved again, to %q", moved)
+	}
+
+	if moved := testEngineFor(t, testFlow, "en").CloseAtSessionLimit(); moved != "" {
+		t.Errorf("a flow with no closing target moved to %q", moved)
 	}
 }

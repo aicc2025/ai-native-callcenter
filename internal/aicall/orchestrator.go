@@ -3,6 +3,7 @@
 package aicall
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -339,7 +340,8 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 		announce(ledgerCallID, *did.FlowID)
 	}
 
-	o.drive(ctx, session, runtime, actions, recorder, log)
+	o.drive(ctx, session, runtime, actions, recorder,
+		budgetFor(spec).since(recorder.answeredAt, time.Now()), log)
 	// The call is over. Whatever was waiting for a closing line to be heard
 	// will never hear it, and the caller's channel is gone with the call.
 	actions.disarm()
@@ -367,55 +369,130 @@ func sessionConfigFor(spec *flow.Spec, runtime *flow.Runtime, language string) p
 	}
 }
 
-// drive consumes the bridge's events and lets the flow steer.
+// drive consumes the bridge's events and lets the flow steer, and keeps the
+// call inside its time budget (sessionBudget). The budget's clocks are
+// delivered here, on the call's own goroutine, because the engine and the
+// runtime they act on belong to it; stopping them when drive returns is all
+// the cancelling they need.
 func (o *Orchestrator) drive(ctx context.Context, session *Session,
-	runtime *flow.Runtime, actions *callActions, recorder *callRecorder, log *slog.Logger) {
+	runtime *flow.Runtime, actions *callActions, recorder *callRecorder,
+	budget sessionBudget, log *slog.Logger) {
 
 	wall := turnsWithoutToolWatch{toolCallTurn: -1}
-	for event := range session.Events() {
-		switch event.Type {
-		case EventTypeCustomerSaid:
-			if event.IsFinal {
-				recorder.say(store.SpeakerCustomer, event.Text)
-				runtime.OnCallerSpoke(event.Text)
+	// deadline is when the limit falls due, fixed once: the wrap-up steer
+	// counts the time left from it whenever the instructions are rendered.
+	deadline := time.Now().Add(budget.limitAfter)
+	var wrapUpDue, limitDue <-chan time.Time
+	if budget.wrapUpAfter > 0 {
+		timer := time.NewTimer(budget.wrapUpAfter)
+		defer timer.Stop()
+		wrapUpDue = timer.C
+	}
+	var limitTimer *time.Timer
+	if budget.limitAfter > 0 {
+		limitTimer = time.NewTimer(budget.limitAfter)
+		defer limitTimer.Stop()
+		limitDue = limitTimer.C
+	}
+	// isLimitWaiting is a limit that came due while the bot held the floor,
+	// waiting for it to be free; limitDue is then its backstop.
+	isLimitWaiting := false
+	enforceLimit := func(how limitEnforcement) {
+		isLimitWaiting = false
+		limitDue = nil
+		o.enforceSessionLimit(ctx, session, runtime, actions, recorder, how, log)
+	}
+
+	events := session.Events()
+	for {
+		select {
+		case <-wrapUpDue:
+			wrapUpDue = nil
+			o.handleWrapUpDue(ctx, session, runtime, actions, deadline, log)
+			continue
+
+		case <-limitDue:
+			switch {
+			case isLimitWaiting:
+				log.Warn("the bot kept the floor past the time limit; ending the call anyway")
+				enforceLimit(limitForced)
+			case session.isHoldingTheFloor():
+				// Asking for a turn over one in progress is refused or cuts
+				// it off; the limit waits for the floor, but not forever.
+				log.Info("call reached its time limit; waiting for the bot to finish its turn")
+				isLimitWaiting = true
+				limitTimer.Reset(cmp.Or(budget.floorWait, actionGraceCap))
+			default:
+				enforceLimit(limitFloorFree)
 			}
+			continue
 
-		case EventTypeBotSaid:
-			if event.IsFinal {
-				recorder.say(store.SpeakerBot, event.Text)
+		case event, ok := <-events:
+			if !ok {
+				return
 			}
+			switch event.Type {
+			case EventTypeCustomerSaid:
+				if event.IsFinal {
+					recorder.say(store.SpeakerCustomer, event.Text)
+					runtime.OnCallerSpoke(event.Text)
+				}
 
-		case EventTypeDigit:
-			recorder.say(store.SpeakerCustomer, "[keypad] "+event.Text)
-			runtime.OnCallerKeyed()
+			case EventTypeBotSaid:
+				if event.IsFinal {
+					recorder.say(store.SpeakerBot, event.Text)
+				}
 
-		case EventTypeToolCall:
-			wall.toolCallTurn = event.Turn
-			o.answerToolCall(ctx, event, session, runtime, actions, recorder, log)
+			case EventTypeDigit:
+				recorder.say(store.SpeakerCustomer, "[keypad] "+event.Text)
+				runtime.OnCallerKeyed()
 
-		case EventTypeNoInput:
-			o.handleDeadAir(session, runtime, actions, log)
+			case EventTypeToolCall:
+				wall.toolCallTurn = event.Turn
+				o.answerToolCall(ctx, event, session, runtime, actions, recorder, log)
 
-		case EventTypeTurnDone:
-			actions.onTurnDone(event.Turn, event.IsInterrupted)
-			wall.onTurnDone(event.Turn, event.IsInterrupted, runtime)
+			case EventTypeNoInput:
+				if isLimitWaiting {
+					enforceLimit(limitCallerSilent)
+					continue
+				}
+				o.handleDeadAir(session, runtime, actions, log)
 
-		case EventTypeBargeIn:
-			actions.onBargeIn()
+			case EventTypeTurnDone:
+				actions.onTurnDone(event.Turn, event.IsInterrupted)
+				wall.onTurnDone(event.Turn, event.IsInterrupted, runtime)
 
-		case EventTypePlaybackDone:
-			o.handlePlaybackDone(event.Turn, &wall, session, runtime, actions, log)
+			case EventTypeBargeIn:
+				actions.onBargeIn()
 
-		case EventTypeFailed:
-			// The conversation cannot continue; the caller still can.
-			log.Warn("conversation failed, rescuing the caller",
-				"reason", event.Text, "cause", event.FailureCause)
-			recorder.markFailed(hangupCauseFor(event.FailureCause))
-			actions.rescueCaller()
-			return
+			case EventTypePlaybackDone:
+				// A limit waiting for the floor goes first, ahead of the
+				// turns-without-a-tool wall: both would close the call, and
+				// the limit is the one that says why.
+				if isLimitWaiting {
+					if !actions.isArmed() {
+						enforceLimit(limitFloorFree)
+						continue
+					}
+					// The turn that held the floor armed an ending of its
+					// own; that ending, bounded by its grace cap, is the one.
+					log.Info("call reached its time limit while an ending was armed; the armed action ends it")
+					isLimitWaiting = false
+					limitDue = nil
+				}
+				o.handlePlaybackDone(event.Turn, &wall, session, runtime, actions, log)
 
-		case EventTypeEnded:
-			return
+			case EventTypeFailed:
+				// The conversation cannot continue; the caller still can.
+				log.Warn("conversation failed, rescuing the caller",
+					"reason", event.Text, "cause", event.FailureCause)
+				recorder.markFailed(hangupCauseFor(event.FailureCause))
+				actions.rescueCaller()
+				return
+
+			case EventTypeEnded:
+				return
+			}
 		}
 	}
 }

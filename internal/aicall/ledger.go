@@ -51,6 +51,10 @@ type callRecorder struct {
 	// "TRANSFER".
 	endReason   string
 	hangupCause string
+	// isSessionLimited says the platform, not the conversation, ended the
+	// call: it ran out of the flow's time budget. Such a call is never
+	// contained (03-data: is_contained), however it closed.
+	isSessionLimited bool
 }
 
 func newCallRecorder(callID uuid.UUID, startedAt time.Time, actor *transcript.Actor) *callRecorder {
@@ -129,6 +133,20 @@ func (r *callRecorder) markHangup() {
 	r.mu.Unlock()
 }
 
+// hangupCauseSessionLimit is what a call ended by the flow's time limit is
+// released with (02 §7).
+const hangupCauseSessionLimit = "SESSION_LIMIT"
+
+// markSessionLimit records that the call reached the flow's time limit. It
+// says why the call ended, not how: the transfer or hangup that follows marks
+// that as it always does.
+func (r *callRecorder) markSessionLimit() {
+	r.mu.Lock()
+	r.isSessionLimited = true
+	r.hangupCause = hangupCauseSessionLimit
+	r.mu.Unlock()
+}
+
 func (r *callRecorder) markFailed(cause string) {
 	r.mu.Lock()
 	r.endReason = "FAILED"
@@ -153,6 +171,7 @@ func (r *callRecorder) finish(ledger Ledger, call *callFacts, log *slog.Logger) 
 	endReason := r.endReason
 	hangupCause := r.hangupCause
 	transferQueue := r.transferQueue
+	isSessionLimited := r.isSessionLimited
 	r.mu.Unlock()
 
 	// A transferred call is normally the human path's row to write, and this
@@ -211,8 +230,10 @@ func (r *callRecorder) finish(ledger Ledger, call *callFacts, log *slog.Logger) 
 		TotalSec:    int(endedAt.Sub(r.startedAt).Seconds()),
 		Status:      status,
 		HangupCause: hangupCause,
-		// Contained: the bot answered and finished the call itself, properly.
-		IsContained:  status == store.CDRStatusAnswered && endReason == "HANGUP",
+		// Contained: the bot answered and finished the call itself, properly —
+		// not because the platform's time limit made it.
+		IsContained: status == store.CDRStatusAnswered && endReason == "HANGUP" &&
+			!isSessionLimited,
 		HasRecording: call.isRecordingEnabled,
 		UserData:     call.userData,
 		Tech:         call.tech,

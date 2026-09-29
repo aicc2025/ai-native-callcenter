@@ -152,6 +152,9 @@ type Session struct {
 	framesQueued int
 	// isBotSpeaking gates barge-in: there is nothing to interrupt otherwise.
 	isBotSpeaking bool
+	// isResponding is true from a model turn's start to its end, audio or
+	// not: the stretch in which asking for another turn collides with it.
+	isResponding bool
 	// speakingSince is when the current turn's first audio was queued, which is
 	// what the barge-in guard window is measured from.
 	speakingSince time.Time
@@ -300,6 +303,16 @@ func (s *Session) Close(ctx context.Context) {
 		_ = s.model.Close(ctx)
 		s.leg.Stop()
 	})
+}
+
+// isClosed reports whether Close has been called.
+func (s *Session) isClosed() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // Wait blocks until every pump has stopped.
@@ -597,6 +610,7 @@ func (s *Session) stopPlayback() int {
 	played := max(s.framesQueued-cleared, 0)
 	s.framesQueued = 0
 	s.isBotSpeaking = false
+	s.isResponding = false
 	// Nothing is left to drain, and no dead-air timer should run: the caller is
 	// already talking.
 	s.drainGeneration++
@@ -609,10 +623,22 @@ func (s *Session) beginTurn() {
 	s.mu.Lock()
 	s.framesQueued = 0
 	s.turnSeq++
+	s.isResponding = true
 	// Any pending drain or dead-air watch belongs to the previous turn.
 	s.drainGeneration++
 	s.idleGeneration++
 	s.mu.Unlock()
+}
+
+// isHoldingTheFloor reports whether the bot has the floor: a turn is being
+// generated, or its tail is still playing to the caller. A turn asked for now
+// would collide with it — refused on the Realtime providers, cut off
+// mid-sentence on gemini.
+func (s *Session) isHoldingTheFloor() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isResponding || s.isBotSpeaking ||
+		(s.framesQueued > 0 && s.leg.Pending() > 0)
 }
 
 // currentTurn reports which model turn is in progress.
@@ -628,6 +654,7 @@ func (s *Session) endTurn() {
 	// The tail of the last sentence is worth padding out rather than losing.
 	s.framer.flush(s.queueFrame)
 	s.isBotSpeaking = false
+	s.isResponding = false
 	s.drainGeneration++
 	marker := playbackMarker{generation: s.drainGeneration, turn: s.turnSeq}
 	s.mu.Unlock()

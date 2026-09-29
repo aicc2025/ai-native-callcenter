@@ -61,11 +61,22 @@ type callActions struct {
 	isLineSpoken bool
 	// armedGeneration lets the cap timer recognise the action it belongs to.
 	armedGeneration int
+	// isEndingLocked says the call's ending has been decided by the platform
+	// (the flow's time limit) and nothing the model does may replace it: arm
+	// keeps what is armed, and the ending tools report success without acting.
+	// Without it a model answering the handover cue with hangup would displace
+	// the transfer, because arming replaces.
+	isEndingLocked bool
 }
 
 // TransferToAgent checks the queue can take the caller, then arms the
 // transfer to run once the bridge line has been heard.
 func (a *callActions) TransferToAgent(ctx context.Context, request flow.TransferRequest) (flow.Result, error) {
+	if a.isEndingDecided() {
+		a.log.Info("transfer ignored: the call's time limit has already decided how it ends",
+			"asked", request.Queue)
+		return flow.Succeeded(nil, ""), nil
+	}
 	queue, ok := a.queueForTransfer(ctx, request.Queue)
 	if !ok {
 		// The refusal is a conversation, not an error: the bot explains and
@@ -181,6 +192,10 @@ func (a *callActions) TakeMessage(ctx context.Context, request flow.MessageReque
 
 // Hangup ends the call once the goodbye has been heard.
 func (a *callActions) Hangup(ctx context.Context, _ flow.HangupRequest) (flow.Result, error) {
+	if a.isEndingDecided() {
+		a.log.Info("hangup ignored: the call's time limit has already decided how it ends")
+		return flow.Succeeded(nil, ""), nil
+	}
 	if a.recorder != nil {
 		a.recorder.markHangup()
 	}
@@ -196,6 +211,11 @@ func (a *callActions) Hangup(ctx context.Context, _ flow.HangupRequest) (flow.Re
 // to speak, with a cap in case that line never finishes.
 func (a *callActions) arm(_ context.Context, action func()) {
 	a.mu.Lock()
+	if a.isEndingLocked {
+		a.mu.Unlock()
+		a.log.Info("not arming: the call's time limit has already decided how it ends")
+		return
+	}
 	a.armed = action
 	a.armedInTurn = a.session.currentTurn()
 	a.isLineSpoken = false
@@ -227,6 +247,52 @@ func (a *callActions) isArmed() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.armed != nil
+}
+
+// lockEnding keeps the ending armed now — or already run — as the call's
+// ending, whatever the model asks for afterwards.
+func (a *callActions) lockEnding() {
+	a.mu.Lock()
+	a.isEndingLocked = true
+	a.mu.Unlock()
+}
+
+// isEndingDecided reports whether lockEnding has been called.
+func (a *callActions) isEndingDecided() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.isEndingLocked
+}
+
+// runArmedNow runs the armed action without waiting for a line, for an ending
+// that has no line to wait for.
+func (a *callActions) runArmedNow() {
+	a.mu.Lock()
+	armed := a.armed
+	a.armed = nil
+	a.mu.Unlock()
+	if armed != nil {
+		armed()
+	}
+}
+
+// openFallbackQueue is the number's own queue when it exists and is taking
+// calls: the one queue the platform may hand a caller to on its own.
+func (a *callActions) openFallbackQueue(ctx context.Context) (catalog.Queue, bool) {
+	if a.fallbackQueue == nil {
+		return catalog.Queue{}, false
+	}
+	queues, err := a.orchestrator.cfg.Catalog.Queues(ctx)
+	if err != nil {
+		a.log.Error("read queues", "error", err)
+		return catalog.Queue{}, false
+	}
+	for _, queue := range queues {
+		if queue.ID == *a.fallbackQueue {
+			return queue, queue.IsEnabled
+		}
+	}
+	return catalog.Queue{}, false
 }
 
 // disarm drops whatever was waiting to be spoken over, because the call it

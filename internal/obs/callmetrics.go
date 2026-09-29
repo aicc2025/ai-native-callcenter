@@ -32,6 +32,7 @@ var (
 	providerSessions metric.Int64Counter
 	providerExpired  metric.Int64Counter
 	botInterruptions metric.Int64Counter
+	botSessionLimits metric.Int64Counter
 
 	transcribeFramesDropped metric.Int64Counter
 	transcribeFramesSent    metric.Int64Counter
@@ -100,6 +101,10 @@ func init() {
 			"out because nothing here is broken: a conversation outlived a cap and "+
 			"the caller was rescued mid-sentence, which is answered by what the flow "+
 			"asks of a caller rather than by fixing the network or the credential."))
+	botSessionLimits, _ = meter.Int64Counter("aicc_bot_session_limits_total",
+		metric.WithDescription("AI calls the platform ended because they reached the "+
+			"flow's time limit (global.maxDurationSec), by how: TRANSFER to the "+
+			"number's queue, or HANGUP when no queue was open."))
 	botInterruptions, _ = meter.Int64Counter("aicc_bot_interruptions_total",
 		metric.WithDescription("Times a caller took the floor back from the bot, by what "+
 			"took it: SPEECH or DTMF. Speech inside the barge-in guard is not counted — "+
@@ -185,6 +190,27 @@ func RecordBotInterruption(reason string) {
 	}
 	botInterruptions.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+// SessionLimitOutcome labels how a call that reached its time limit ended.
+const (
+	SessionLimitOutcomeTransfer = "TRANSFER"
+	SessionLimitOutcomeHangup   = "HANGUP"
+)
+
+// RecordSessionLimit counts one AI call the platform ended because it reached
+// the flow's time limit, by outcome (SessionLimitOutcome*).
+//
+// It is the platform's own cap, where aicc_provider_sessions_expired_total is
+// the vendor's: a rise here says callers are being kept on the line longer
+// than the flow allows, a loop or a conversation the flow never closes, and
+// the flow is what answers it.
+func RecordSessionLimit(outcome string) {
+	if botSessionLimits == nil {
+		return
+	}
+	botSessionLimits.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("outcome", outcome)))
 }
 
 // RecordProviderSessionStarted counts one conversation session being opened.

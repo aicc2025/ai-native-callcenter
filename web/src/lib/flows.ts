@@ -79,6 +79,9 @@ export interface FlowTool {
   }
 }
 
+/** What an unset global.maxDurationSec means, as the engine reads it. */
+export const DEFAULT_MAX_DURATION_SEC = 900
+
 export interface FlowGlobal {
   persona?: FlowText
   rules?: FlowTextList
@@ -104,6 +107,13 @@ export interface FlowGlobal {
    * closingTarget.
    */
   maxTurnsWithoutTool?: number
+  /**
+   * The call's time budget in seconds, counted from the bot answering. At 80%
+   * the model is told to wrap up; at 100% the platform ends the call: a
+   * transfer to the number's queue when it is open, otherwise closingTarget.
+   * Unset is DEFAULT_MAX_DURATION_SEC, 0 is off, anything else 60–3600.
+   */
+  maxDurationSec?: number
   alwaysAllowedTools?: string[]
   apiBaseEnv?: string
   transitions?: FlowTransition[]

@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useNameThisPage } from '@/lib/breadcrumb'
 import { describeError, fieldErrorText } from '@/lib/errors'
 import {
+  DEFAULT_MAX_DURATION_SEC,
   describeRule,
   globalEntries,
   locateNodes,
@@ -901,6 +902,11 @@ function Persona({ spec, lang }: { spec: FlowSpec; lang: SpecLang }) {
           </Fact>
           <Fact label={t('bots.maxTurnsWithoutTool')}>
             <span className="tabular">{spec.global?.maxTurnsWithoutTool || t('bots.off')}</span>
+          </Fact>
+          <Fact label={t('bots.maxDurationSec')}>
+            <span className="tabular">
+              {(spec.global?.maxDurationSec ?? DEFAULT_MAX_DURATION_SEC) || t('bots.off')}
+            </span>
           </Fact>
           <Fact label={t('bots.alwaysAllowed')}>
             <span className="font-mono text-xs">
