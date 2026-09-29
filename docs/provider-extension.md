@@ -182,7 +182,12 @@ names are this vendor's own and go in `global.voice`, as on every provider. And
 because nothing this client sends makes that engine take a turn, **every
 terminal phase must carry an `announce`** — `RequiresTerminalAnnounce` turns
 that into a publish rule, so a flow that would have left a caller in silence is
-refused with a reason rather than discovered on a call. An entry phase with no
+refused with a reason rather than discovered on a call. The flow's time limit
+(`global.maxDurationSec`) is the one ending that rule cannot see: with no
+`global.closingTarget` a doubao call is hung up at the limit with no line at
+all, because there is no goodbye cue to send. Doubao flows should set
+`closingTarget`, whose terminal phase already carries an `announce`. This is
+documented, not enforced at publish. An entry phase with no
 `announce` is legal and means the bot answers and waits for the caller to speak.
 
 ```sh

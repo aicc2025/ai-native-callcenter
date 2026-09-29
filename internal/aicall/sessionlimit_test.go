@@ -478,3 +478,197 @@ func TestTheBudgetCountsFromTheAnswer(t *testing.T) {
 		t.Errorf("default limit = %v, want 900s", got)
 	}
 }
+
+// Once the limit has chosen the ending, a model hangup or transfer is answered
+// as a success and changes nothing: the armed ending still runs afterwards.
+func TestALockedTransferEndingSurvivesAModelHangupAndTransfer(t *testing.T) {
+	h := newLimitHarness(t, limitSetup{queue: "support", hasClosingTarget: true})
+	turnBefore := h.session.currentTurn()
+	h.enforce(limitFloorFree)
+
+	if result, err := h.actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
+		t.Fatalf("hangup after the limit = %+v, %v", result, err)
+	}
+	if result, err := h.actions.TransferToAgent(t.Context(),
+		flow.TransferRequest{Queue: "after-hours", Reason: "CALLER_REQUEST"}); err != nil || !result.IsOK {
+		t.Fatalf("transfer after the limit = %+v, %v", result, err)
+	}
+
+	h.actions.onPlaybackDone(turnBefore + 1)
+	if got := h.sw.recordedTransfers(); len(got) != 1 || got[0] != "chan-9→7001" {
+		t.Fatalf("transfers = %v, want the limit's own transfer to 7001", got)
+	}
+	if got := h.sw.variable("aicc_bot_reason"); got != "SESSION_LIMIT" {
+		t.Errorf("aicc_bot_reason = %q, want SESSION_LIMIT kept", got)
+	}
+	if got := h.sw.variable("aicc_bot_finished"); got != "" {
+		t.Errorf("aicc_bot_finished = %q; the model's hangup replaced the transfer", got)
+	}
+}
+
+func TestALockedClosingEndingSurvivesAModelHangupAndTransfer(t *testing.T) {
+	h := newLimitHarness(t, limitSetup{queue: "after-hours", hasClosingTarget: true})
+	turnBefore := h.session.currentTurn()
+	h.enforce(limitFloorFree)
+
+	if result, err := h.actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
+		t.Fatalf("hangup after the limit = %+v, %v", result, err)
+	}
+	if result, err := h.actions.TransferToAgent(t.Context(),
+		flow.TransferRequest{Queue: "support", Reason: "CALLER_REQUEST"}); err != nil || !result.IsOK {
+		t.Fatalf("transfer after the limit = %+v, %v", result, err)
+	}
+
+	h.actions.onPlaybackDone(turnBefore + 1)
+	if got := h.sw.variable("aicc_bot_finished"); got != "FLOW_END" {
+		t.Errorf("aicc_bot_finished = %q, want the closing phase's FLOW_END", got)
+	}
+	if got := h.sw.recordedTransfers(); len(got) != 0 {
+		t.Errorf("transfers = %v, want none: the model's transfer was ignored", got)
+	}
+}
+
+// A transfer the queue check allowed but the action then refused (here: the
+// caller's channel is unknown) falls through to the closing path rather than
+// leaving the call with no ending at all.
+func TestARefusedLimitTransferFallsThroughToTheClosingPath(t *testing.T) {
+	h := newLimitHarness(t, limitSetup{queue: "support", hasClosingTarget: true})
+	h.actions.callerChannel = ""
+	turnBefore := h.session.currentTurn()
+
+	h.enforce(limitFloorFree)
+
+	if got := h.engine.NodeID(); got != "farewell" {
+		t.Fatalf("node = %q, want the closing phase after the refused transfer", got)
+	}
+	if got := h.model.spokenLines(); len(got) != 1 || got[0] != "Thank you for calling, goodbye." {
+		t.Fatalf("spoken = %v, want the closing announce", got)
+	}
+	if !h.actions.isEndingDecided() {
+		t.Error("the closing ending was not locked")
+	}
+	// With no channel to stamp, the closing action's proof is the session
+	// ending once the line has been heard.
+	h.actions.onPlaybackDone(turnBefore + 1)
+	if !h.session.isClosed() {
+		t.Error("the closing ending did not run")
+	}
+	if got := h.sw.recordedTransfers(); len(got) != 0 {
+		t.Errorf("transfers = %v, want none", got)
+	}
+	if h.recorder.hangupCause != "SESSION_LIMIT" {
+		t.Errorf("hangup cause = %q, want SESSION_LIMIT", h.recorder.hangupCause)
+	}
+}
+
+// Doubao takes no text cue, so with no closing phase there is no goodbye to
+// ask for: the hangup runs at once, and says why.
+func TestTheLimitHangsUpDoubaoAtOnceWhenTheFlowHasNoClosingPhase(t *testing.T) {
+	h := newLimitHarness(t, limitSetup{profile: provider.DoubaoProfile()})
+
+	h.enforce(limitFloorFree)
+
+	if cues := h.model.recordedUserText(); len(cues) != 0 {
+		t.Errorf("cues = %v, want none on a client that takes no cue", cues)
+	}
+	if h.actions.isArmed() || !h.session.isClosed() {
+		t.Error("the hangup did not run at once")
+	}
+	if got := h.sw.variable("aicc_bot_finished"); got != "SESSION_LIMIT" {
+		t.Errorf("aicc_bot_finished = %q, want SESSION_LIMIT", got)
+	}
+}
+
+// After a tool result is sent the answer turn begins one round trip later; in
+// that gap the bot still has the floor, and a cue would be refused.
+func TestASentToolResultHoldsTheFloorUntilTheAnswerTurnBegins(t *testing.T) {
+	h := newLimitHarness(t, limitSetup{})
+	if h.session.isHoldingTheFloor() {
+		t.Fatal("holding the floor before anything was asked")
+	}
+
+	if err := h.session.AnswerTool("call-1", `{"ok":1}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !h.session.isHoldingTheFloor() {
+		t.Fatal("not holding the floor between the tool result and the answer turn")
+	}
+
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	awaitBridgeEvent(t, h.session, EventTypeTurnDone)
+	h.session.mu.Lock()
+	owed := h.session.turnOwedUntil
+	h.session.mu.Unlock()
+	if !owed.IsZero() {
+		t.Error("the owed turn was not cleared when the answer turn began")
+	}
+}
+
+// The claim on the floor cannot stick: a turn that never comes stops counting
+// after its expiry, and closing the session drops it at once.
+func TestAnOwedTurnThatNeverComesStopsHoldingTheFloor(t *testing.T) {
+	h := newLimitHarness(t, limitSetup{})
+	if err := h.session.SendCue("hello"); err != nil {
+		t.Fatal(err)
+	}
+	if !h.session.isHoldingTheFloor() {
+		t.Fatal("a cue's turn is not counted")
+	}
+	h.session.mu.Lock()
+	h.session.turnOwedUntil = time.Now().Add(-time.Millisecond)
+	h.session.mu.Unlock()
+	if h.session.isHoldingTheFloor() {
+		t.Error("an expired claim still holds the floor")
+	}
+
+	if err := h.session.SendCue("again"); err != nil {
+		t.Fatal(err)
+	}
+	h.session.Close(context.Background())
+	if h.session.isHoldingTheFloor() {
+		t.Error("a closed session still holds the floor")
+	}
+}
+
+// A limit that falls due right after a tool result waits for the answer turn,
+// and acts only once the caller has heard it.
+func TestTheLimitWaitsThroughTheGapAfterAToolResult(t *testing.T) {
+	h, _ := driveHarness(t, sessionBudget{limitAfter: 40 * time.Millisecond, floorWait: time.Minute})
+	if err := h.session.AnswerTool("call-1", `{"ok":1}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if cues := h.model.recordedUserText(); len(cues) != 0 {
+		t.Fatalf("cues = %v, want none: the answer turn is still to come", cues)
+	}
+	if got := h.sw.recordedTransfers(); len(got) != 0 {
+		t.Fatalf("transfers = %v before the answer turn was heard", got)
+	}
+
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	h.model.events <- provider.Event{Type: provider.EventTypeAudioDelta,
+		Audio: make([]byte, media.FrameSamples)}
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	waitFor(t, "the handover cue", func() bool { return len(h.model.recordedUserText()) == 1 })
+	if got := h.sw.variable("aicc_bot_reason"); got != "SESSION_LIMIT" {
+		t.Errorf("aicc_bot_reason = %q, want SESSION_LIMIT", got)
+	}
+}
+
+// A PLAYBACK_DONE already in the channel when the next turn began is stale:
+// consumed while the floor is held again, it does not enforce the limit.
+func TestAStalePlaybackDoneDoesNotEnforceTheLimitOverANewTurn(t *testing.T) {
+	h, _ := driveHarness(t, sessionBudget{limitAfter: 30 * time.Millisecond, floorWait: time.Minute})
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	time.Sleep(120 * time.Millisecond) // the limit is due and waiting
+
+	h.session.emit(Event{Type: EventTypePlaybackDone, Turn: 0})
+	time.Sleep(100 * time.Millisecond)
+	if cues := h.model.recordedUserText(); len(cues) != 0 {
+		t.Fatalf("cues = %v, want none: a new turn holds the floor", cues)
+	}
+
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	waitFor(t, "the handover cue", func() bool { return len(h.model.recordedUserText()) == 1 })
+}

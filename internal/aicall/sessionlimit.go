@@ -105,8 +105,9 @@ const (
 // it is putting the caller through. Otherwise the flow's own goodbye
 // (global.closingTarget), exactly as the turns-without-a-tool wall reaches it,
 // or a plain goodbye when the flow has none; a bot that kept the floor past
-// the backstop is not asked for one, and the hangup runs at once. Either way the ending is then
-// locked, so the model cannot replace it with one of its own.
+// the backstop is not asked for one, and the hangup runs at once. Either way
+// the ending is then locked, so the model cannot replace it with one of its
+// own.
 //
 // It never overrides an ending already armed or a phase that already ends the
 // call: those are bounded by the grace cap and say more than the limit does.
@@ -172,7 +173,7 @@ func (o *Orchestrator) askForTheHandover(session *Session, actions *callActions,
 		actions.runArmedNow()
 		return
 	}
-	if err := session.model.SendUserText(handoverCue(lang)); err != nil {
+	if err := session.SendCue(handoverCue(lang)); err != nil {
 		log.Warn("could not ask for the handover line; transferring now", "error", err)
 		actions.runArmedNow()
 	}
@@ -183,15 +184,24 @@ func (o *Orchestrator) askForTheHandover(session *Session, actions *callActions,
 // so does a bot that never gave up the floor: the cue asks for a turn the
 // provider refuses (gemini answers by cutting the bot off), so the armed
 // hangup runs now. A closing phase's announce is not this: a line pre-empts.
+//
+// Doubao is the same: it takes no text cue, so a flow with no closing phase
+// (global.closingTarget) is hung up with no line at the limit. Doubao flows
+// should set one; docs/provider-extension.md.
 func (o *Orchestrator) askForTheGoodbye(session *Session, actions *callActions,
 	lang string, how limitEnforcement, log *slog.Logger) {
 
+	if o.cfg.Profile.RequiresTerminalAnnounce {
+		log.Info("this provider takes no goodbye cue and the flow has no closing phase; ending now")
+		actions.runArmedNow()
+		return
+	}
 	if how == limitForced {
 		actions.runArmedNow()
 		return
 	}
 	isCallerSilent := how == limitCallerSilent
-	if err := session.model.SendUserText(goodbyeCue(lang, isCallerSilent)); err != nil {
+	if err := session.SendCue(goodbyeCue(lang, isCallerSilent)); err != nil {
 		log.Warn("could not ask for the goodbye; ending now", "error", err)
 		actions.runArmedNow()
 	}

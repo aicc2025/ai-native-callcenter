@@ -75,8 +75,8 @@ func (s *Spec) validate() error {
 	} else if s.Global.MaxTurnsWithoutTool > 0 && s.Global.ClosingTarget == "" {
 		report("global.maxTurnsWithoutTool is set but global.closingTarget is empty, so the wall has nowhere to send the call")
 	}
-	if d := s.Global.MaxDurationSec; d != nil && *d != 0 && (*d < MinMaxDurationSec || *d > MaxMaxDurationSec) {
-		report("global.maxDurationSec is %d; it is a number of seconds from %d to %d, 0 to turn the limit off", *d, MinMaxDurationSec, MaxMaxDurationSec)
+	if d := s.Global.MaxDurationSec; d != nil && *d != 0 && (*d < MinDurationLimitSec || *d > MaxDurationLimitSec) {
+		report("global.maxDurationSec is %d; it is a number of seconds from %d to %d, 0 to turn the limit off", *d, MinDurationLimitSec, MaxDurationLimitSec)
 	}
 
 	// Every tool a phase names must exist, or the model will be offered

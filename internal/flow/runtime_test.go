@@ -482,13 +482,17 @@ func TestTheWrapUpSteerStaysInTheInstructions(t *testing.T) {
 	}{
 		{"en", 3 * time.Minute, 0, "within about 3 minutes", "within about 3 minutes"},
 		{"en", 3 * time.Minute, 90 * time.Second, "within about 3 minutes", "within about 2 minutes"},
-		{"en", 3 * time.Minute, 150 * time.Second, "within about 3 minutes", "within the next minute"},
-		{"en", 3 * time.Minute, 3 * time.Minute, "within about 3 minutes", "within the next minute"},
-		{"en", 3 * time.Minute, 5 * time.Minute, "within about 3 minutes", "within the next minute"},
-		{"en", 12 * time.Second, 0, "within the next minute", "within the next minute"},
+		{"en", 3 * time.Minute, 130 * time.Second, "within about 3 minutes", "within the next minute"},
+		{"en", 3 * time.Minute, 3 * time.Minute, "within about 3 minutes", "right away"},
+		{"en", 3 * time.Minute, 5 * time.Minute, "within about 3 minutes", "right away"},
+		{"en", 12 * time.Second, 0, "right away", "right away"},
+		{"en", 50 * time.Second, 0, "within the next minute", "within the next minute"},
+		{"en", 3 * time.Minute, 3*time.Minute + time.Second, "within about 3 minutes", "right away"},
+		{"zh", 12 * time.Second, 0, "马上", "马上"},
 		{"zh", 3 * time.Minute, 0, "约3分钟内", "约3分钟内"},
 		{"zh", 3 * time.Minute, 90 * time.Second, "约3分钟内", "约2分钟内"},
-		{"zh", 3 * time.Minute, 4 * time.Minute, "约3分钟内", "一分钟内"},
+		{"zh", 3 * time.Minute, 130 * time.Second, "约3分钟内", "一分钟内"},
+		{"zh", 3 * time.Minute, 4 * time.Minute, "约3分钟内", "马上"},
 	} {
 		engine := NewEngine(loadTestFlow(t), tc.lang, nil,
 			slog.New(slog.NewTextHandler(io.Discard, nil)))

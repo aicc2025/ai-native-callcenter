@@ -15,8 +15,10 @@ carries the one-line installer's files.
 ### Added
 
 - Flow DSL: `global.maxDurationSec`, the call's time limit counted from the
-  bot answering. Unset means 900 seconds, `0` turns it off, and any other
-  value must be between 60 and 3600. At 80% of the limit the bot is told to
+  bot answering. Unset (or `null`) means 900 seconds, `0` turns it off, and any
+  other value must be between 60 and 3600. Gemini's own provider session cap
+  (about ten minutes) comes before the 900 s default, so a gemini flow should set
+  a lower limit (docs/provider-extension.md). At 80% of the limit the bot is told to
   wrap up. At the limit the call is transferred to the number's queue with
   reason `SESSION_LIMIT` when that queue is enabled; otherwise it moves to
   `global.closingTarget`, or hangs up after a goodbye (at once, with no

@@ -286,8 +286,9 @@ type Global struct {
 	// bot answers (02 §7). At 80% the model is told to wrap up; at 100% the
 	// engine ends the call itself: a transfer to the DID's queue when that
 	// queue is open, otherwise ClosingTarget (or a plain goodbye when there is
-	// none). Absent means DefaultMaxDurationSec; 0 turns the limit off;
-	// anything else must lie between MinMaxDurationSec and MaxMaxDurationSec.
+	// none). Absent, or null (the same thing to encoding/json), means
+	// DefaultMaxDurationSec, not off; 0 turns the limit off;
+	// anything else must lie between MinDurationLimitSec and MaxDurationLimitSec.
 	// A pointer, because absent and 0 mean different things.
 	MaxDurationSec *int `json:"maxDurationSec,omitempty"`
 	// AlwaysAllowedTools are available in every phase — asking for a person,
@@ -304,10 +305,10 @@ type Global struct {
 // The bounds of Global.MaxDurationSec.
 const (
 	DefaultMaxDurationSec = 900
-	// MinMaxDurationSec keeps the wrap-up window (the last 20%) at twelve
+	// MinDurationLimitSec keeps the wrap-up window (the last 20%) at twelve
 	// seconds or more, long enough for one reply.
-	MinMaxDurationSec = 60
-	MaxMaxDurationSec = 3600
+	MinDurationLimitSec = 60
+	MaxDurationLimitSec = 3600
 )
 
 // MaxDuration is the call's time budget; zero means the flow turned the

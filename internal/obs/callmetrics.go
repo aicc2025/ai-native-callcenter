@@ -103,8 +103,9 @@ func init() {
 			"asks of a caller rather than by fixing the network or the credential."))
 	botSessionLimits, _ = meter.Int64Counter("aicc_bot_session_limits_total",
 		metric.WithDescription("AI calls the platform ended because they reached the "+
-			"flow's time limit (global.maxDurationSec), by how: TRANSFER to the "+
-			"number's queue, or HANGUP when no queue was open."))
+			"flow's time limit (global.maxDurationSec), by how: TRANSFER, counted "+
+			"when the transfer to the number's queue is armed (not when it completes), "+
+			"or HANGUP when no queue was open."))
 	botInterruptions, _ = meter.Int64Counter("aicc_bot_interruptions_total",
 		metric.WithDescription("Times a caller took the floor back from the bot, by what "+
 			"took it: SPEECH or DTMF. Speech inside the barge-in guard is not counted — "+

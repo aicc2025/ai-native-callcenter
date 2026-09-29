@@ -314,32 +314,41 @@ func (r *Runtime) confidentialityRule() string {
 func (r *Runtime) wrapUpRule() string {
 	remaining := r.wrapUpDeadline.Sub(r.now())
 	minutes := int((remaining + 30*time.Second) / time.Minute)
+	// Under 45 s (which rounds to no minute at all) "within the next minute"
+	// would grant more time than is left.
+	isImmediate := remaining < 45*time.Second
 	if r.engine.Lang() == LangZH {
-		within := "一分钟内"
-		if minutes > 1 {
-			within = fmt.Sprintf("约%d分钟内", minutes)
+		when := "请在一分钟内结束通话"
+		switch {
+		case isImmediate:
+			when = "请马上结束通话"
+		case minutes > 1:
+			when = fmt.Sprintf("请在约%d分钟内结束通话", minutes)
 		}
 		if r.isWrapUpTransferOpen {
-			return "本次通话即将达到时长上限。请在" + within +
-				"结束通话：总结已办理的事项，能解决的尽快解决，" +
+			return "本次通话即将达到时长上限。" + when +
+				"：总结已办理的事项，能解决的尽快解决，" +
 				"否则主动提出转人工。不要向来电者提及时长上限。"
 		}
-		return "本次通话即将达到时长上限。请在" + within +
-			"结束通话：总结已办理的事项，能解决的尽快解决，" +
+		return "本次通话即将达到时长上限。" + when +
+			"：总结已办理的事项，能解决的尽快解决，" +
 			"然后礼貌地结束通话。不要提出转人工，不要向来电者提及时长上限。"
 	}
-	within := "the next minute"
-	if minutes > 1 {
-		within = fmt.Sprintf("about %d minutes", minutes)
+	when := "within the next minute"
+	switch {
+	case isImmediate:
+		when = "right away"
+	case minutes > 1:
+		when = fmt.Sprintf("within about %d minutes", minutes)
 	}
 	if r.isWrapUpTransferOpen {
-		return "This call is close to its time limit. Bring it to an end within " +
-			within + ": sum up what has been done, resolve what you can, or offer " +
+		return "This call is close to its time limit. Bring it to an end " +
+			when + ": sum up what has been done, resolve what you can, or offer " +
 			"to put the caller through to a person. Do not mention the time limit " +
 			"to the caller."
 	}
-	return "This call is close to its time limit. Bring it to an end within " +
-		within + ": sum up what has been done, resolve what you can, and close " +
+	return "This call is close to its time limit. Bring it to an end " +
+		when + ": sum up what has been done, resolve what you can, and close " +
 		"the call politely. Do not offer to transfer the caller to a person. " +
 		"Do not mention the time limit to the caller."
 }

@@ -471,6 +471,13 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 				// the limit is the one that says why.
 				if isLimitWaiting {
 					if !actions.isArmed() {
+						// A PLAYBACK_DONE already queued when the next turn
+						// began is stale: the floor is held again, and the
+						// backstop still bounds the wait.
+						if session.isHoldingTheFloor() {
+							log.Info("time limit still waiting: the bot holds the floor again")
+							continue
+						}
 						enforceLimit(limitFloorFree)
 						continue
 					}
@@ -682,7 +689,7 @@ func (o *Orchestrator) handleDeadAir(session *Session, runtime *flow.Runtime,
 		// are the goodbye, not another prompt.
 		cue = goodbyeCue(runtime.Engine().Lang(), true)
 	}
-	if err := session.model.SendUserText(cue); err != nil {
+	if err := session.SendCue(cue); err != nil {
 		log.Warn("could not prompt a silent caller", "error", err)
 	}
 }
@@ -766,7 +773,7 @@ func (o *Orchestrator) handlePlaybackDone(turn int, wall *turnsWithoutToolWatch,
 	if moved == "" || o.afterMove(moved, session, runtime, actions, log) {
 		return
 	}
-	if err := session.model.SendUserText(goodbyeCue(runtime.Engine().Lang(), false)); err != nil {
+	if err := session.SendCue(goodbyeCue(runtime.Engine().Lang(), false)); err != nil {
 		log.Warn("could not ask for the goodbye", "error", err)
 	}
 }

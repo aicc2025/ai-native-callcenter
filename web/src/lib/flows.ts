@@ -91,7 +91,8 @@ export interface FlowGlobal {
   /**
    * The flow's own goodbye phase: a terminal node the engine moves a call to
    * on its own — after repeated silence in a phase where no rule can fire on
-   * NO_INPUT, or once tool-less replies exceed maxTurnsWithoutTool. A
+   * NO_INPUT, or once tool-less replies exceed maxTurnsWithoutTool, or the time limit
+   * (maxDurationSec) is reached. A
    * backstop for a model that keeps asking "anything else?", not a
    * replacement for a closing phase that hangs up on a decline. Must name a
    * terminal phase.
@@ -111,7 +112,7 @@ export interface FlowGlobal {
    * The call's time budget in seconds, counted from the bot answering. At 80%
    * the model is told to wrap up; at 100% the platform ends the call: a
    * transfer to the number's queue when it is open, otherwise closingTarget.
-   * Unset is DEFAULT_MAX_DURATION_SEC, 0 is off, anything else 60–3600.
+   * Unset (or null) is DEFAULT_MAX_DURATION_SEC, 0 is off, anything else 60–3600.
    */
   maxDurationSec?: number
   alwaysAllowedTools?: string[]
