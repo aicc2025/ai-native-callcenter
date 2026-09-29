@@ -336,7 +336,7 @@ func TestDriveAnswersToolCallsThroughTheFlow(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		o.drive(t.Context(), session, runtime, actions, recorder, log)
+		o.drive(t.Context(), session, runtime, actions, recorder, sessionBudget{}, log)
 	}()
 
 	// The model asks for a transfer.
@@ -428,7 +428,7 @@ func TestAFailureSaysWhatTheProviderCalledIt(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				o.drive(t.Context(), session, runtime, actions, recorder, log)
+				o.drive(t.Context(), session, runtime, actions, recorder, sessionBudget{}, log)
 			}()
 
 			model.events <- provider.Event{
@@ -883,7 +883,7 @@ func TestDriveClosesAToolLessLoopThroughTheWall(t *testing.T) {
 	actions.recorder = recorder
 	runtime := flow.NewRuntime(engine, actions, flow.NewBackend(""), nil, log)
 
-	go o.drive(t.Context(), session, runtime, actions, recorder, log)
+	go o.drive(t.Context(), session, runtime, actions, recorder, sessionBudget{}, log)
 
 	for range 3 {
 		model.events <- provider.Event{Type: provider.EventTypeInputTranscript,
@@ -1026,7 +1026,7 @@ func TestATerminalTransferPhaseDoesNotHangUpOnTheCallerInstead(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		o.drive(t.Context(), session, runtime, actions, recorder, log)
+		o.drive(t.Context(), session, runtime, actions, recorder, sessionBudget{}, log)
 	}()
 
 	model.events <- provider.Event{
@@ -1402,7 +1402,7 @@ func startToolPath(t *testing.T, profile provider.Profile, lang string) *toolPat
 		engine: engine, done: make(chan struct{})}
 	go func() {
 		defer close(h.done)
-		o.drive(t.Context(), session, runtime, actions, recorder, log)
+		o.drive(t.Context(), session, runtime, actions, recorder, sessionBudget{}, log)
 	}()
 	return h
 }

@@ -706,6 +706,7 @@
     "fallbackTarget": "Fallback phase",
     "closingTarget": "Closing target",
     "maxTurnsWithoutTool": "Max tool-less replies per phase",
+    "maxDurationSec": "Time limit (seconds)",
     "off": "Off",
     "alwaysAllowed": "Always allowed",
     "builtinTool": "Built in — implemented by the platform, no HTTP call",

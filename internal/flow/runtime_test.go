@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeActions records what the model asked the application to do.
@@ -465,4 +466,83 @@ func TestWithNoQueuesTheTransferToolIsStillCallable(t *testing.T) {
 		return
 	}
 	t.Fatal("transfer_to_agent was not offered at all")
+}
+
+// The wrap-up steer is platform text in the call's language that stays in the
+// standing instructions from the moment it begins, across phase changes, and
+// counts the time left from the clock at each render rather than repeating the
+// figure it began with.
+func TestTheWrapUpSteerStaysInTheInstructions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		lang         string
+		left         time.Duration // when it begins
+		later        time.Duration // how far the clock moves before the phase change
+		want, wantAt string
+	}{
+		{"en", 3 * time.Minute, 0, "within about 3 minutes", "within about 3 minutes"},
+		{"en", 3 * time.Minute, 90 * time.Second, "within about 3 minutes", "within about 2 minutes"},
+		{"en", 3 * time.Minute, 130 * time.Second, "within about 3 minutes", "within the next minute"},
+		{"en", 3 * time.Minute, 3 * time.Minute, "within about 3 minutes", "right away"},
+		{"en", 3 * time.Minute, 5 * time.Minute, "within about 3 minutes", "right away"},
+		{"en", 12 * time.Second, 0, "right away", "right away"},
+		{"en", 50 * time.Second, 0, "within the next minute", "within the next minute"},
+		{"en", 3 * time.Minute, 3*time.Minute + time.Second, "within about 3 minutes", "right away"},
+		{"zh", 12 * time.Second, 0, "马上", "马上"},
+		{"zh", 3 * time.Minute, 0, "约3分钟内", "约3分钟内"},
+		{"zh", 3 * time.Minute, 90 * time.Second, "约3分钟内", "约2分钟内"},
+		{"zh", 3 * time.Minute, 130 * time.Second, "约3分钟内", "一分钟内"},
+		{"zh", 3 * time.Minute, 4 * time.Minute, "约3分钟内", "马上"},
+	} {
+		engine := NewEngine(loadTestFlow(t), tc.lang, nil,
+			slog.New(slog.NewTextHandler(io.Discard, nil)))
+		r := NewRuntime(engine, &fakeActions{}, nil, nil,
+			slog.New(slog.NewTextHandler(io.Discard, nil)))
+		clock := time.Now()
+		r.now = func() time.Time { return clock }
+		if r.IsWrappingUp() || strings.Contains(r.Instructions(), tc.want) {
+			t.Fatalf("%s: wrapping up before BeginWrapUp", tc.lang)
+		}
+
+		r.BeginWrapUp(clock.Add(tc.left), true)
+		if got := r.Instructions(); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: instructions lack the wrap-up steer %q:\n%s", tc.lang, tc.want, got)
+		}
+		clock = clock.Add(tc.later)
+		engine.enter("report")
+		if got := r.Instructions(); !strings.Contains(got, tc.wantAt) {
+			t.Errorf("%s: after %s and a phase change the steer should say %q:\n%s",
+				tc.lang, tc.later, tc.wantAt, got)
+		}
+	}
+}
+
+// The steer offers a person only when a transfer can happen; otherwise it asks
+// for a polite close and never invites one, in either language.
+func TestTheWrapUpSteerOffersATransferOnlyWhenItIsOpen(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		lang, offer string
+	}{
+		{"en", "put the caller through to a person"},
+		{"zh", "主动提出转人工"},
+	} {
+		for _, isOpen := range []bool{true, false} {
+			engine := NewEngine(loadTestFlow(t), tc.lang, nil,
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			r := NewRuntime(engine, &fakeActions{}, nil, nil,
+				slog.New(slog.NewTextHandler(io.Discard, nil)))
+			r.BeginWrapUp(time.Now().Add(3*time.Minute), isOpen)
+			got := r.Instructions()
+			if has := strings.Contains(got, tc.offer); has != isOpen {
+				t.Errorf("%s open=%v: offer present = %v:\n%s", tc.lang, isOpen, has, got)
+			}
+			if !isOpen && !(strings.Contains(got, "politely") || strings.Contains(got, "礼貌")) {
+				t.Errorf("%s closed: no polite close asked for:\n%s", tc.lang, got)
+			}
+			if !strings.Contains(got, "time limit") && !strings.Contains(got, "时长上限") {
+				t.Errorf("%s: steer lost", tc.lang)
+			}
+		}
+	}
 }

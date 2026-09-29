@@ -152,6 +152,17 @@ type Session struct {
 	framesQueued int
 	// isBotSpeaking gates barge-in: there is nothing to interrupt otherwise.
 	isBotSpeaking bool
+	// isResponding is true from a model turn's start to its end, audio or
+	// not: the stretch in which asking for another turn collides with it.
+	isResponding bool
+	// openTurns counts model turns started and not yet ended or interrupted
+	// (capped at two). Turns end in the order they start, so an interruption
+	// that arrives while another turn is open belongs to the older one: it is
+	// stale, and must not take the floor from the turn that replaced it.
+	openTurns int
+	// turnOwedUntil is when an asked-for turn that has not started yet stops
+	// counting as the bot's floor; zero is none. See askedForATurn.
+	turnOwedUntil time.Time
 	// speakingSince is when the current turn's first audio was queued, which is
 	// what the barge-in guard window is measured from.
 	speakingSince time.Time
@@ -297,9 +308,22 @@ func (s *Session) Start(ctx context.Context) error {
 func (s *Session) Close(ctx context.Context) {
 	s.closeOnce.Do(func() {
 		close(s.done)
+		s.mu.Lock()
+		s.turnOwedUntil = time.Time{}
+		s.mu.Unlock()
 		_ = s.model.Close(ctx)
 		s.leg.Stop()
 	})
+}
+
+// isClosed reports whether Close has been called.
+func (s *Session) isClosed() bool {
+	select {
+	case <-s.done:
+		return true
+	default:
+		return false
+	}
 }
 
 // Wait blocks until every pump has stopped.
@@ -311,7 +335,36 @@ func (s *Session) Wait() { s.wg.Wait() }
 
 // AnswerTool replies to a tool call and steers the next turn.
 func (s *Session) AnswerTool(toolCallID, output, hint string) error {
-	return s.model.SendToolResult(toolCallID, output, hint)
+	if err := s.model.SendToolResult(toolCallID, output, hint); err != nil {
+		return err
+	}
+	s.askedForATurn()
+	return nil
+}
+
+// SendCue sends the model a text it answers with a turn of its own: a
+// dead-air check, a goodbye, a keypress.
+func (s *Session) SendCue(text string) error {
+	if err := s.model.SendUserText(text); err != nil {
+		return err
+	}
+	s.askedForATurn()
+	return nil
+}
+
+// askedForATurn records that the model owes a turn which has not started: a
+// tool result or a cue was just sent, and the provider's answer begins one
+// round trip later (ResponseStarted). In that gap nothing else says the bot
+// holds the floor, and a cue sent then is refused ("already has an active
+// response") on the Realtime providers.
+//
+// The claim expires after actionGraceCap so a turn that never comes (a
+// provider that answers a result with silence) cannot pin the floor: the
+// caller of isHoldingTheFloor has its own backstop as well.
+func (s *Session) askedForATurn() {
+	s.mu.Lock()
+	s.turnOwedUntil = time.Now().Add(actionGraceCap)
+	s.mu.Unlock()
 }
 
 // Reinstruct replaces the standing instructions, which is how a flow moves the
@@ -453,12 +506,17 @@ func (s *Session) handleModelEvent(event provider.Event) {
 		// that on its own, so this doubles as a backstop: whatever the reason,
 		// the caller must not keep hearing the abandoned answer.
 		//
+		//
+		// A provider that cancels a response and starts another can report the
+		// cancellation after the new turn has begun.
+		isCurrent := s.endInterruptedTurn()
+		//
 		// Cancelling is not trimming. A provider that stops on its own knows
 		// it stopped, and still has no idea how much of what it produced ever
 		// reached the caller — only this side counts frames. When we have
 		// already flushed, this is a no-op: nothing was queued, so nothing
 		// was heard, so there is nothing to say.
-		if playedMs := s.stopPlayback(); playedMs > 0 {
+		if playedMs := s.stopPlayback(isCurrent); playedMs > 0 {
 			// Said out loud for the same reason the caller-initiated case is:
 			// an interruption that leaves no trace cannot be told apart
 			// afterwards from one that never happened. This path reports the
@@ -551,7 +609,7 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 		}
 	}
 
-	playedMs := s.stopPlayback()
+	playedMs := s.stopPlayback(true)
 	// The provider is told whenever the caller stopped hearing something, not
 	// only while it was still producing. Its history is a record of what was
 	// said to the caller, and an utterance the caller never heard has to come
@@ -585,7 +643,13 @@ func (s *Session) tellTheModelWhatWasHeard(reason provider.InterruptReason, play
 }
 
 // stopPlayback drops queued speech and reports how much the caller heard.
-func (s *Session) stopPlayback() int {
+//
+// endsTheTurn says the flush is for the turn in progress. A stale interruption
+// (see openTurns) is about an older turn whose audio was flushed when it was
+// cancelled; it leaves the current turn's isResponding alone, because a turn
+// that is still being generated is not over. The event carries no turn
+// identity, so staleness is worked out from the order turns start and end.
+func (s *Session) stopPlayback(endsTheTurn bool) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -597,6 +661,9 @@ func (s *Session) stopPlayback() int {
 	played := max(s.framesQueued-cleared, 0)
 	s.framesQueued = 0
 	s.isBotSpeaking = false
+	if endsTheTurn {
+		s.isResponding = false
+	}
 	// Nothing is left to drain, and no dead-air timer should run: the caller is
 	// already talking.
 	s.drainGeneration++
@@ -605,14 +672,38 @@ func (s *Session) stopPlayback() int {
 	return played * frameDurationMs
 }
 
+// endInterruptedTurn accounts for an interruption event and reports whether it
+// ended the turn in progress rather than an older, already-replaced one.
+func (s *Session) endInterruptedTurn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.openTurns = max(s.openTurns-1, 0)
+	return s.openTurns == 0
+}
+
 func (s *Session) beginTurn() {
 	s.mu.Lock()
 	s.framesQueued = 0
 	s.turnSeq++
+	s.isResponding = true
+	s.turnOwedUntil = time.Time{}
+	s.openTurns = min(s.openTurns+1, 2)
 	// Any pending drain or dead-air watch belongs to the previous turn.
 	s.drainGeneration++
 	s.idleGeneration++
 	s.mu.Unlock()
+}
+
+// isHoldingTheFloor reports whether the bot has the floor: a turn is being
+// generated, or its tail is still playing to the caller. A turn asked for now
+// would collide with it — refused on the Realtime providers, cut off
+// mid-sentence on gemini.
+func (s *Session) isHoldingTheFloor() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isResponding || s.isBotSpeaking ||
+		(!s.turnOwedUntil.IsZero() && time.Now().Before(s.turnOwedUntil)) ||
+		(s.framesQueued > 0 && s.leg.Pending() > 0)
 }
 
 // currentTurn reports which model turn is in progress.
@@ -628,6 +719,8 @@ func (s *Session) endTurn() {
 	// The tail of the last sentence is worth padding out rather than losing.
 	s.framer.flush(s.queueFrame)
 	s.isBotSpeaking = false
+	s.isResponding = false
+	s.openTurns = max(s.openTurns-1, 0)
 	s.drainGeneration++
 	marker := playbackMarker{generation: s.drainGeneration, turn: s.turnSeq}
 	s.mu.Unlock()
@@ -792,7 +885,7 @@ func (s *Session) pumpDigits() {
 			s.bargeIn(provider.InterruptReasonDTMF)
 			s.emit(Event{Type: EventTypeDigit, Text: digit})
 
-			if err := s.model.SendUserText(keypressText(digit)); err != nil {
+			if err := s.SendCue(keypressText(digit)); err != nil {
 				s.log.Warn("could not report a keypress to the model",
 					"digit", digit, "error", err)
 			}

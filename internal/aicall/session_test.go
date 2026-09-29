@@ -1209,3 +1209,45 @@ func TestNewRejectsAnIncompleteSession(t *testing.T) {
 		t.Error("a session was built with no model")
 	}
 }
+
+// A provider that cancels a response and starts another can report the
+// cancellation after the new turn has begun. That interruption is about the
+// older turn and must not end the one now being generated.
+func TestAStaleInterruptDoesNotEndTheCurrentTurn(t *testing.T) {
+	session, _, model := startBridge(t, provider.OpenAIProfile())
+	awaitBridgeEvent(t, session, EventTypeReady)
+	responding := func() bool {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		return session.isResponding
+	}
+
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{Type: provider.EventTypeInterrupted, Status: "cancelled"}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+	if !responding() {
+		t.Fatal("a stale interruption ended the turn now being generated")
+	}
+
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+	if responding() {
+		t.Error("the current turn's own end did not clear it")
+	}
+}
+
+// The ordinary case is unchanged: an interruption of the only open turn ends it.
+func TestAnInterruptOfTheOnlyOpenTurnEndsIt(t *testing.T) {
+	session, _, model := startBridge(t, provider.OpenAIProfile())
+	awaitBridgeEvent(t, session, EventTypeReady)
+
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{Type: provider.EventTypeInterrupted, Status: "cancelled"}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.isResponding {
+		t.Error("the interrupted turn is still counted as responding")
+	}
+}

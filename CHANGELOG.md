@@ -5,6 +5,29 @@ under one tag, `rasonyang/ai-native-callcenter` and `rasonyang/freeswitch-aicc`;
 run them together. From v0.2.0 on, the GitHub release of the same tag also
 carries the one-line installer's files.
 
+## Unreleased
+
+### Upgrade notes
+
+- Existing flows without `maxDurationSec` now end AI calls after 15 minutes.
+  Set `"maxDurationSec": 0` in a flow's `global` to keep the old behaviour.
+
+### Added
+
+- Flow DSL: `global.maxDurationSec`, the call's time limit counted from the
+  bot answering. Unset (or `null`) means 900 seconds, `0` turns it off, and any
+  other value must be between 60 and 3600. Gemini's own provider session cap
+  (about ten minutes) comes before the 900 s default, so a gemini flow should set
+  a lower limit (docs/provider-extension.md). At 80% of the limit the bot is told to
+  wrap up. At the limit the call is transferred to the number's queue with
+  reason `SESSION_LIMIT` when that queue is enabled; otherwise it moves to
+  `global.closingTarget`, or hangs up after a goodbye (at once, with no
+  goodbye asked for, when the bot never gave up the floor). The wrap-up steer
+  counts the time left when it is rendered, and offers a transfer to a person
+  only when that queue is open. The CDR records hangup
+  cause `SESSION_LIMIT` and does not count the call as contained. New metric
+  `aicc_bot_session_limits_total{outcome}`.
+
 ## v0.2.0 - 2026-09-28
 
 ### Upgrade notes
