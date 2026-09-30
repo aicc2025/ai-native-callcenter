@@ -38,6 +38,14 @@ type Engine struct {
 	// isToolReplyNext records that the last completed turn made a tool call,
 	// so the next one answers the tool's result rather than the caller.
 	isToolReplyNext bool
+
+	// isInToolBatch is set between BeginToolBatch and EndToolBatch: the tool
+	// calls of one model response are being answered. batchNode is the phase
+	// that response was made in, and batchMovedTo the last phase one of its
+	// tools moved the call to, or empty.
+	isInToolBatch bool
+	batchNode     Node
+	batchMovedTo  string
 }
 
 // NewEngine starts a call at the flow's initial phase. baseSlots seeds
@@ -82,7 +90,8 @@ func (e *Engine) Slot(name string) (any, bool) {
 	return value, ok
 }
 
-// IsToolAllowed reports whether a tool may be used in the current phase.
+// IsToolAllowed reports whether a tool may be used in the current phase, or,
+// inside a tool batch, in the phase the batch's response was made in.
 //
 // The allowlist is what keeps a model from running ahead of itself — offering
 // to book an appointment before it has identified the caller. Tools the flow
@@ -92,12 +101,50 @@ func (e *Engine) IsToolAllowed(name string) bool {
 	if slices.Contains(e.spec.Global.AlwaysAllowedTools, name) {
 		return true
 	}
-	return slices.Contains(e.current.Tools, "*") || slices.Contains(e.current.Tools, name)
+	tools := e.toolPhase().Tools
+	return slices.Contains(tools, "*") || slices.Contains(tools, name)
 }
 
-// AllowedTools lists what the current phase permits, for diagnostics.
+// AllowedTools lists what IsToolAllowed permits, for diagnostics.
 func (e *Engine) AllowedTools() []string {
-	return append(slices.Clone(e.spec.Global.AlwaysAllowedTools), e.current.Tools...)
+	return append(slices.Clone(e.spec.Global.AlwaysAllowedTools), e.toolPhase().Tools...)
+}
+
+// BeginToolBatch starts the tool calls of one model response. A model can ask
+// for several tools at once, and it asked for all of them in the phase it was
+// in when it made the response. Until EndToolBatch each of them is judged in
+// that phase: allowed by its allowlist, and moved on by its rules. Otherwise
+// the first tool's move would get the second refused as out of phase, though
+// the model asked for both together.
+//
+// Moves still take effect one tool at a time, and the last one wins: a later
+// tool's move replaces an earlier one's, which is logged. A terminal phase is
+// the exception, as it is everywhere else: once a tool has ended the call, no
+// later tool in the batch moves it. Calling it inside a batch does nothing.
+func (e *Engine) BeginToolBatch() {
+	if e.isInToolBatch {
+		return
+	}
+	e.isInToolBatch = true
+	e.batchNode = e.current
+	e.batchMovedTo = ""
+}
+
+// EndToolBatch ends the batch BeginToolBatch started: from here on a tool is
+// judged in the current phase again.
+func (e *Engine) EndToolBatch() {
+	e.isInToolBatch = false
+	e.batchNode = Node{}
+	e.batchMovedTo = ""
+}
+
+// toolPhase is the phase a tool call is judged in: the batch's, inside one,
+// else the current one.
+func (e *Engine) toolPhase() Node {
+	if e.isInToolBatch {
+		return e.batchNode
+	}
+	return e.current
 }
 
 // Instruction is what the model should be doing now, with collected values
@@ -144,10 +191,18 @@ func (e *Engine) OnToolResult(tool string, result map[string]any) string {
 	}
 	e.slots[tool+".calls"] = e.countOf(tool+".calls") + 1
 
-	if node := e.guardRunawayLoop(); node != "" {
-		return node
+	node := e.guardRunawayLoop()
+	if node == "" {
+		node = e.fire(EventTypeToolResult, tool)
 	}
-	return e.fire(EventTypeToolResult, tool)
+	if node != "" && e.isInToolBatch {
+		if e.batchMovedTo != "" {
+			e.log.Info("a later tool of the same response moved the call again; the earlier move is superseded",
+				"tool", tool, "superseded", e.batchMovedTo, "node", node)
+		}
+		e.batchMovedTo = node
+	}
+	return node
 }
 
 // defaultNoInputLimit is how many consecutive silences the engine tolerates
@@ -351,7 +406,9 @@ func (e *Engine) guardRunawayLoop() string {
 	return e.enter(target)
 }
 
-// fire evaluates the current phase's rules, then the flow-wide ones.
+// fire evaluates the current phase's rules, then the flow-wide ones. A tool
+// result inside a tool batch is evaluated against the batch's phase instead
+// (BeginToolBatch).
 //
 // Node rules come first so a phase can override a cross-cutting rule; within
 // each set, lower priority wins and equal priorities keep their declared order.
@@ -360,7 +417,11 @@ func (e *Engine) fire(event EventType, tool string) string {
 		return ""
 	}
 
-	rules := append(sortedRules(e.current.Transitions), sortedRules(e.spec.Global.Transitions)...)
+	from := e.current
+	if event == EventTypeToolResult {
+		from = e.toolPhase()
+	}
+	rules := append(sortedRules(from.Transitions), sortedRules(e.spec.Global.Transitions)...)
 	for _, rule := range rules {
 		if !rule.matches(event, tool) {
 			continue
@@ -371,14 +432,16 @@ func (e *Engine) fire(event EventType, tool string) string {
 			// unexpected shape rather than a malformed flow. Skipping the rule
 			// keeps the call going.
 			e.log.Error("transition condition could not be evaluated",
-				"node", e.current.id, "target", rule.Target, "error", err)
+				"node", from.id, "target", rule.Target, "error", err)
 			continue
 		}
 		if !ok {
 			continue
 		}
-		if rule.Target == e.current.id {
-			return "" // an explicit instruction to stay
+		// An explicit instruction to stay, or a move to where an earlier tool
+		// of the batch has already taken the call.
+		if rule.Target == from.id || rule.Target == e.current.id {
+			return ""
 		}
 		return e.enter(rule.Target)
 	}
