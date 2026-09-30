@@ -403,6 +403,9 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 		o.enforceSessionLimit(ctx, session, runtime, actions, recorder, how, log)
 	}
 
+	// batch is the tool calls of the response being answered, from the first
+	// of them to that response's TURN_DONE.
+	var batch toolBatch
 	events := session.Events()
 	for {
 		select {
@@ -449,7 +452,11 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 
 			case EventTypeToolCall:
 				wall.toolCallTurn = event.Turn
-				o.answerToolCall(ctx, event, session, runtime, actions, recorder, log)
+				if !batch.isOpen {
+					batch.isOpen = true
+					runtime.BeginToolBatch()
+				}
+				o.answerToolCall(ctx, event, &batch, session, runtime, actions, recorder, log)
 
 			case EventTypeNoInput:
 				if isLimitWaiting {
@@ -461,6 +468,7 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 			case EventTypeTurnDone:
 				actions.onTurnDone(event.Turn, event.IsInterrupted)
 				wall.onTurnDone(event.Turn, event.IsInterrupted, runtime)
+				o.closeToolBatch(&batch, session, runtime, log)
 
 			case EventTypeBargeIn:
 				actions.onBargeIn()
@@ -542,8 +550,15 @@ func hangupCauseFor(cause provider.FailureCause) string {
 // after the result is what still says the line then. A phase that is not
 // terminal keeps it on every client: the direction would stay in the history
 // and nobody has measured what it does to the turns after it.
-func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, session *Session,
-	runtime *flow.Runtime, actions *callActions, recorder *callRecorder, log *slog.Logger) {
+//
+// That SpeakText waits for the batch: the call belongs to a response that may
+// ask for more tools, and a line pre-empts. Said now, it would cancel the
+// response before its later calls arrived, and on doubao and gemini, which
+// wait for every call's answer, it would go out while one was still owed.
+// closeToolBatch says it once the response is over and every call answered.
+func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, batch *toolBatch,
+	session *Session, runtime *flow.Runtime, actions *callActions, recorder *callRecorder,
+	log *slog.Logger) {
 
 	recorder.toolCall(event.ToolName, event.ToolArgs)
 	output, moved := runtime.Dispatch(ctx, event.ToolName, event.ToolArgs)
@@ -553,11 +568,20 @@ func (o *Orchestrator) answerToolCall(ctx context.Context, event Event, session 
 		if err := session.AnswerTool(event.ToolCallID, output, ""); err != nil {
 			log.Warn("could not answer a tool call", "tool", event.ToolName, "error", err)
 		}
-		// A phase change re-pins the standing instructions, which is what
-		// keeps collected facts alive past a provider's context limits.
-		o.afterMove(moved, session, runtime, actions, log)
+		if moved != "" {
+			// A phase change re-pins the standing instructions, which is what
+			// keeps collected facts alive past a provider's context limits.
+			// A later move in the batch replaces this one's line.
+			o.enterPhase(moved, session, runtime, actions, log)
+			batch.lineOwedIn = ""
+			if runtime.Announce() != "" {
+				batch.lineOwedIn = moved
+			}
+		}
 		return
 	}
+	// The line rides in this answer; an earlier move's line is superseded.
+	batch.lineOwedIn = ""
 
 	// The flow's own hint for the move is the new phase's instruction; the
 	// line replaces it, in the language the line is written in. The phase's
@@ -612,14 +636,53 @@ func (o *Orchestrator) afterMove(moved string, session *Session,
 	// the line first would race that turn into existence before the turn is
 	// recorded, and then no playback would ever count: the call would end ten
 	// seconds later on the grace cap, in silence the caller has to sit through.
-	if line := runtime.Announce(); line != "" {
-		if err := session.Speak(line, runtime.Engine().IsTerminal()); err != nil {
-			log.Warn("could not say the phase's own line", "node", moved, "error", err)
-			return false
-		}
-		return true
+	return o.sayPhaseLine(session, runtime, log)
+}
+
+// sayPhaseLine asks for the current phase's own line, where it has one, and
+// reports whether it did.
+func (o *Orchestrator) sayPhaseLine(session *Session, runtime *flow.Runtime,
+	log *slog.Logger) bool {
+
+	line := runtime.Announce()
+	if line == "" {
+		return false
 	}
-	return false
+	if err := session.Speak(line, runtime.Engine().IsTerminal()); err != nil {
+		log.Warn("could not say the phase's own line",
+			"node", runtime.Engine().NodeID(), "error", err)
+		return false
+	}
+	return true
+}
+
+// toolBatch is the tool calls of one model response, answered one at a time as
+// they arrive and closed by the response's TURN_DONE (Engine.BeginToolBatch).
+type toolBatch struct {
+	isOpen bool
+	// lineOwedIn is the phase the batch's last move went to, when that phase
+	// has a line of its own that waits for the batch to close
+	// (answerToolCall). Empty is no line owed.
+	lineOwedIn string
+}
+
+// closeToolBatch ends the batch of the response that has just finished, if
+// there is one, and says the line its last move left owed. Every call of the
+// response has been answered by now: they all arrive before its TURN_DONE. A
+// call that has moved on since, other than by a tool (the time limit), said
+// its own phase's line on the way, and owes nothing more.
+func (o *Orchestrator) closeToolBatch(batch *toolBatch, session *Session,
+	runtime *flow.Runtime, log *slog.Logger) {
+
+	if !batch.isOpen {
+		return
+	}
+	runtime.EndToolBatch()
+	lineOwedIn := batch.lineOwedIn
+	*batch = toolBatch{}
+	if lineOwedIn != "" && lineOwedIn == runtime.Engine().NodeID() {
+		o.sayPhaseLine(session, runtime, log)
+	}
 }
 
 // enterPhase re-pins the standing instructions for the phase the call has just
