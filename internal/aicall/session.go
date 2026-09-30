@@ -109,6 +109,9 @@ type Config struct {
 	// the check.
 	NoInput time.Duration
 
+	// Logger is the call's logger. The orchestrator has already bound the
+	// call's identity to it (callId, aiccCallId, did), so the session adds
+	// no key of its own: slog writes a key bound twice twice.
 	Logger *slog.Logger
 }
 
@@ -224,7 +227,7 @@ func New(leg Leg, model provider.VoiceSession, profile provider.Profile,
 	return &Session{
 		leg:          leg,
 		model:        model,
-		log:          log.With("callId", leg.ID()),
+		log:          log,
 		providerName: profile.Name,
 		cfg:          cfg,
 		uplink:       uplink,
