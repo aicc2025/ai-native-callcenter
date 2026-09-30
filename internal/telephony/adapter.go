@@ -96,8 +96,10 @@ func (a *Adapter) DeleteCallcenterAgent(name string) error {
 //
 // A minute is what one missed call costs the caller: they hear hold music
 // while a phone nobody is holding rings out, and only then does the queue try
-// somebody else. Fifteen seconds is long enough to reach a headset.
-const agentRingSec = 15
+// somebody else. Fifteen seconds was too short the other way: three rings on the
+// browser phone, and agents reported the call stopping before they could reach
+// it. Thirty is five rings, measured live.
+const agentRingSec = 30
 
 func (a *Adapter) SetCallcenterAgentContact(name, extensionNumber string, autoAnswer bool) error {
 	vars := []string{fmt.Sprintf("leg_timeout=%d", agentRingSec)}
