@@ -578,6 +578,77 @@ func TestAProviderInitiatedCancelStillReportsWhatWasHeard(t *testing.T) {
 	}
 }
 
+// The post-tool answer queued behind a filler line's unplayed tail is flushed
+// whole when the caller answers the filler. Zero milliseconds heard is still a
+// report: without it the model keeps believing the caller received the answer.
+func TestABargeInOverAQueuedButUnheardTurnReportsZeroHeard(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: -1, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+
+	// Ten frames of the previous turn are still queued; the current turn adds
+	// eight behind them, so a flush discards all eighteen and none of the
+	// current turn was heard.
+	leg.holdFrames(18)
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{
+		Type:  provider.EventTypeAudioDelta,
+		Audio: make([]byte, media.FrameSamples*8),
+	}
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+
+	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+
+	interrupts := model.recordedInterrupts()
+	if len(interrupts) != 1 || interrupts[0].playedMs != 0 {
+		t.Fatalf("interrupts = %+v, want one reporting 0 ms heard", interrupts)
+	}
+}
+
+// The provider-initiated cancel reports a turn that played nothing the same
+// way.
+func TestAProviderCancelOverAnUnheardTurnReportsZeroHeard(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: -1, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+
+	leg.holdFrames(18)
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{
+		Type:  provider.EventTypeAudioDelta,
+		Audio: make([]byte, media.FrameSamples*8),
+	}
+	model.events <- provider.Event{
+		Type: provider.EventTypeInterrupted, Status: "cancelled",
+	}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+
+	interrupts := model.recordedInterrupts()
+	if len(interrupts) != 1 || interrupts[0].playedMs != 0 {
+		t.Fatalf("interrupts = %+v, want one reporting 0 ms heard", interrupts)
+	}
+}
+
+// A cancelled turn that never queued a frame has nothing to trim: reporting 0
+// would name an item the caller was never sent audio for.
+func TestAProviderCancelOfATurnWithNoQueuedAudioSaysNothing(t *testing.T) {
+	session, _, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: -1, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{
+		Type: provider.EventTypeInterrupted, Status: "cancelled",
+	}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+
+	if got := model.recordedInterrupts(); len(got) != 0 {
+		t.Errorf("recorded %d interrupts for a turn with no audio: %+v", len(got), got)
+	}
+}
+
 // Once the queue is flushed there is nothing left to report, and a second
 // trim would name a length nobody heard. The provider's own cancellation
 // arriving after our barge-in must stay silent.

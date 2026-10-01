@@ -4,7 +4,6 @@
 {"type":"input_audio_buffer.append","audio":"AH+A/w=="}
 {"type":"response.cancel"}
 {"audio_end_ms":120,"content_index":0,"item_id":"item-1","type":"conversation.item.truncate"}
-{"audio_end_ms":200,"content_index":0,"item_id":"item-1","type":"conversation.item.truncate"}
 {"session":{"instructions":"You are now closing the call."},"type":"session.update"}
 {"item":{"content":[{"text":"2","type":"input_text"}],"role":"user","type":"message"},"type":"conversation.item.create"}
 {"type":"response.create"}

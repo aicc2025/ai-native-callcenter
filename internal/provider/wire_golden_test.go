@@ -130,13 +130,13 @@ func TestTheFramesOfAWholeCallAreWhatTheyWere(t *testing.T) {
 				"response": map[string]any{"status": "completed"}})
 			awaitEvent(t, session, EventTypeResponseDone)
 
-			// Once the turn has ended there is nothing left to cancel, but how
-			// much the caller heard is still worth saying.
+			// The item was already trimmed above and is spent: a second report
+			// for the same turn must not overwrite the first, so nothing is
+			// sent. (Trimming after the turn ended is covered by
+			// TestInterruptAfterTheResponseEndedTrimsWithoutCancelling.)
 			if err := session.Interrupt(InterruptReasonDTMF, 200); err != nil {
 				t.Fatalf("interrupt after the turn ended: %v", err)
 			}
-			sent++
-			awaitFrames(t, f, sent)
 
 			if err := session.UpdateInstructions("You are now closing the call."); err != nil {
 				t.Fatalf("update instructions: %v", err)

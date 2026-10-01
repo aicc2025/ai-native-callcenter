@@ -923,6 +923,61 @@ func TestBargeInTruncatesTheSpokenItemNotTheToolCall(t *testing.T) {
 	}
 }
 
+// A turn queued behind an earlier turn's tail and flushed before a frame played
+// has been heard for 0 ms. That is still a trim: the item comes out of the
+// history whole.
+func TestInterruptReportingZeroHeardTruncatesTheCurrentItem(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+
+	f.send(map[string]any{"type": "response.created"})
+	f.send(map[string]any{"type": "response.output_item.added",
+		"item": map[string]any{"id": "item_9", "type": "message"}})
+	time.Sleep(50 * time.Millisecond)
+
+	if err := session.Interrupt(InterruptReasonSpeech, 0); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	truncate := f.awaitMessage("conversation.item.truncate")
+	if truncate["item_id"] != "item_9" || truncate["audio_end_ms"] != float64(0) {
+		t.Errorf("truncate = %v, want item_9 trimmed to 0 ms", truncate)
+	}
+}
+
+// The id of an earlier response, heard in full, is never the target of a later
+// trim: a response that has not produced a spoken item yet (or never will, a
+// tool call alone) leaves nothing to truncate. After a trim the item is spent.
+func TestAStaleItemIsNeverTruncated(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+
+	f.send(map[string]any{"type": "response.created"})
+	f.send(map[string]any{"type": "response.output_item.added",
+		"item": map[string]any{"id": "item_old", "type": "message"}})
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	awaitEvent(t, session, EventTypeResponseDone)
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.output_item.added",
+		"item": map[string]any{"id": "item_call", "type": "function_call"}})
+	time.Sleep(50 * time.Millisecond)
+
+	if err := session.Interrupt(InterruptReasonSpeech, 0); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	f.refuteMessage("conversation.item.truncate")
+}
+
 // Where it does not, a missed cancel leaves the model talking over the caller.
 func TestInterruptOnAProviderThatMustBeTold(t *testing.T) {
 	f := newFakeProvider(t, acceptSession)

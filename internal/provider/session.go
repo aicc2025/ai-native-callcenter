@@ -85,7 +85,11 @@ type VoiceSession interface {
 
 	// Interrupt handles barge-in. playedMs is how much of the current response
 	// the caller actually heard, which some providers need in order to keep
-	// their own history honest about what was said.
+	// their own history honest about what was said. Zero is meaningful: the
+	// response's audio was queued and none of it reached the caller, so the
+	// whole response is to be treated as unheard. The caller invokes Interrupt
+	// only when something was playing or queued; a negative value means "not
+	// known" and truncates nothing.
 	//
 	// This differs from the design's single-argument sketch: truncation cannot
 	// be expressed without the played duration, and the caller is the only
