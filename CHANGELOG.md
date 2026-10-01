@@ -27,6 +27,16 @@ carries the one-line installer's files.
   only when that queue is open. The CDR records hangup
   cause `SESSION_LIMIT` and does not count the call as contained. New metric
   `aicc_bot_session_limits_total{outcome}`.
+- AI calls: the bot is told, as a platform rule beside the confidentiality
+  rule, never to say it is transferring the caller, looking something up,
+  saving a message or ending the call unless it calls that tool in the same
+  reply. A claim made anyway is detected from the bot's transcript, logged,
+  counted in the new metric `aicc_bot_unbacked_claims_total{claim,provider}`
+  and recorded on the CDR as `unbackedClaims` (`TRANSFER`, `LOOKUP`,
+  `MESSAGE`, `FAREWELL`; database column `unbacked_claims`, migration 00034).
+  It changes no call behaviour and not `isContained`; a containment figure
+  that should not count a caller told something that never happened can
+  leave those calls out (#44).
 
 ### Fixed
 
@@ -36,6 +46,10 @@ carries the one-line installer's files.
   cap, so the transfer ran ten seconds after the last repeat, and a `hangup`
   after a transfer could hang up a caller who had been told they were being
   put through. The repeat is answered as done and changes nothing (#25).
+- CDR: a call the bot decided to transfer but never handed over (the caller
+  hung up during the closing line) no longer carries the queue's `queueId`.
+  The row was counted in the queue reports as a queue call answered inside
+  the SLA, with a wait of 0 s, for a caller who never reached the queue (#44).
 
 ## v0.2.0 - 2026-09-28
 

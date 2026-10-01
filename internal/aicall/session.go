@@ -60,8 +60,8 @@ const (
 type Event struct {
 	Type EventType
 
-	// Turn numbers the model turn an event belongs to (TURN_DONE and
-	// PLAYBACK_DONE). A consumer sequencing an action "after the line that is
+	// Turn numbers the model turn an event belongs to (TURN_DONE,
+	// PLAYBACK_DONE, TOOL_CALL and BOT_SAID). A consumer sequencing an action "after the line that is
 	// about to be spoken" compares turn numbers: the turn a tool call arrived
 	// in is not the turn its closing line plays in.
 	Turn int
@@ -543,7 +543,10 @@ func (s *Session) handleModelEvent(event provider.Event) {
 		s.emit(Event{Type: EventTypeCustomerSaid, Text: event.Text, IsFinal: event.IsFinal})
 
 	case provider.EventTypeOutputTranscript:
-		s.emit(Event{Type: EventTypeBotSaid, Text: event.Text, IsFinal: event.IsFinal})
+		// The turn rides along so the line can be judged with the tool calls
+		// of its own response (claimWatch).
+		s.emit(Event{Type: EventTypeBotSaid, Text: event.Text, IsFinal: event.IsFinal,
+			Turn: s.currentTurn()})
 
 	case provider.EventTypeToolCall:
 		s.emit(Event{

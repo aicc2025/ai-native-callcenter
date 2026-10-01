@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/api"
+	"github.com/rasonyang/ai-native-callcenter/internal/store"
 	"github.com/rasonyang/ai-native-callcenter/internal/telephony"
 )
 
@@ -47,6 +48,28 @@ func TestEveryMissedReasonIsOneTheContractNames(t *testing.T) {
 	} {
 		if !decided[string(promised)] {
 			t.Errorf("the contract names %s but no call can be given it", promised)
+		}
+	}
+}
+
+// TestEveryUnbackedClaimIsOneTheContractNames keeps the claim vocabulary the
+// store writes and the CDR's unbackedClaims enum in step, both ways.
+func TestEveryUnbackedClaimIsOneTheContractNames(t *testing.T) {
+	t.Parallel()
+	stored := make(map[string]bool, len(store.UnbackedClaims))
+	for _, claim := range store.UnbackedClaims {
+		stored[claim] = true
+		if !api.UnbackedClaim(claim).Valid() {
+			t.Errorf("the store can record %s, which the contract's UnbackedClaim "+
+				"enum does not name — clients cannot type it", claim)
+		}
+	}
+	for _, promised := range []api.UnbackedClaim{
+		api.UnbackedClaimTRANSFER, api.UnbackedClaimLOOKUP,
+		api.UnbackedClaimMESSAGE, api.UnbackedClaimFAREWELL,
+	} {
+		if !stored[string(promised)] {
+			t.Errorf("the contract names %s but nothing can record it", promised)
 		}
 	}
 }

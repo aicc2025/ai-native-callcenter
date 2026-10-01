@@ -2205,6 +2205,11 @@ export interface components {
          * @enum {string}
          */
         MissedReason: "SHORT_ABANDONED" | "ABANDONED_RINGING" | "ABANDONED_WAITING" | "AGENTS_DID_NOT_ANSWER" | "NO_AVAILABLE_AGENT";
+        /**
+         * @description Something the bot told the caller it was doing, or had done, in a turn with no tool call behind it: TRANSFER (transferring or connecting them), LOOKUP (looking something up), MESSAGE (a message or callback request saved), FAREWELL (a goodbye while nothing was ending the call). Detected from the bot's own transcript, so it is a signal to look at the call, not proof: a claim the platform cannot read is not flagged, and a phrasing it misreads can be.
+         * @enum {string}
+         */
+        UnbackedClaim: "TRANSFER" | "LOOKUP" | "MESSAGE" | "FAREWELL";
         /** @enum {string} */
         LegKind: "TRUNK" | "DIALING" | "BOT" | "QUEUE" | "AGENT";
         /** @description One hop of the call's journey, for the journey summary. */
@@ -2266,6 +2271,8 @@ export interface components {
             /** @description True when the bot finished the conversation without a human. */
             isContained: boolean;
             hasRecording: boolean;
+            /** @description Each kind of claim the bot made with no tool call behind it, once. Absent when it made none. It changes nothing about the call: a call can be contained and still carry one, and a containment figure that should not count a caller who was told something that never happened leaves such calls out. */
+            unbackedClaims?: components["schemas"]["UnbackedClaim"][];
             userData?: {
                 [key: string]: unknown;
             };

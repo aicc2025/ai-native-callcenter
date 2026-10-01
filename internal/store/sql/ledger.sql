@@ -29,14 +29,14 @@ INSERT INTO cdrs (
     agent_ids, primary_agent_id,
     ring_sec, bot_sec, queue_wait_sec, talk_sec, bill_sec, total_sec,
     status, hangup_cause, missed_reason, disposition,
-    is_contained, has_recording, user_data, tech, legs
+    is_contained, has_recording, user_data, tech, legs, unbacked_claims
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
     $7, $8, $9, $10, $11,
     $12, $13,
     $14, $15, $16, $17, $18, $19,
     $20, $21, $22, $23,
-    $24, $25, $26, $27, $28
+    $24, $25, $26, $27, $28, $29
 ) ON CONFLICT (call_id) DO UPDATE SET
     started_at = EXCLUDED.started_at,
     answered_at = EXCLUDED.answered_at,
@@ -64,7 +64,8 @@ INSERT INTO cdrs (
     has_recording = EXCLUDED.has_recording,
     user_data = EXCLUDED.user_data,
     tech = EXCLUDED.tech,
-    legs = EXCLUDED.legs
+    legs = EXCLUDED.legs,
+    unbacked_claims = EXCLUDED.unbacked_claims
 WHERE EXCLUDED.ended_at > cdrs.ended_at;
 
 -- name: GetCDR :one

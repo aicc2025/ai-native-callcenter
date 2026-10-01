@@ -115,8 +115,17 @@ cdrs(call_id uuid pk, started_at, answered_at, ended_at,
      disposition text, is_contained bool, has_recording bool,
      user_data jsonb,      -- business context (ticketId, slots); merge-patched during the call
      tech jsonb,           -- CDR technical tab: sipCallId, codec, IPs (release cause is the hangup_cause column)
-     legs jsonb)
+     legs jsonb,
+     unbacked_claims text[] check <@ ('TRANSFER','LOOKUP','MESSAGE','FAREWELL'))
+                                       -- added 2026-10-01 (00034, #44): each kind of claim the bot made in a
+                                       -- turn with no tool call behind it ("I'm transferring you" with no
+                                       -- transfer_to_agent). Detected from the bot's transcript; changes no
+                                       -- call behaviour and not is_contained. Reaches the human path's row
+                                       -- through the aicc_bot_unbacked_claims channel variable.
      -- legs: [{"kind":"TRUNK"|"DIALING"|"BOT"|"QUEUE"|"AGENT","label":…,"durationSec":…,"note":…}]
+     -- queue_id on a row the bot writes is the queue the caller was handed to, set when the transfer
+     -- executes, not when transfer_to_agent accepts it (#44): an accepted transfer the caller never
+     -- reached was otherwise counted as a queue call answered inside the SLA.
   -- idx_cdrs_started_at (desc), idx_cdrs_queue_id_started_at, idx_cdrs_primary_agent_id_started_at, idx_cdrs_status
 transcripts(id bigserial pk, call_id, seq int, occurred_at timestamptz,
             role varchar check in ('BOT','CALLER'),

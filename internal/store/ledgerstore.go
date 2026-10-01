@@ -72,6 +72,13 @@ type CDR struct {
 	Disposition  string `json:"disposition,omitempty"`
 	IsContained  bool   `json:"isContained"`
 	HasRecording bool   `json:"hasRecording"`
+	// UnbackedClaims is what the bot told the caller it was doing, or had
+	// done, in a turn with no tool call behind it: each kind once
+	// (UnbackedClaim*), empty when it made none. It changes nothing about the
+	// call; it is there so that a conversation which reads as contained can be
+	// told apart from one where the caller was promised something that never
+	// happened.
+	UnbackedClaims []string `json:"unbackedClaims,omitempty"`
 
 	UserData map[string]any `json:"userData,omitempty"`
 	Tech     map[string]any `json:"tech,omitempty"`
@@ -117,6 +124,25 @@ const (
 	CDRStatusFailed   = "FAILED"
 )
 
+// What a bot can claim without a tool call behind it: the whole vocabulary of
+// cdrs.unbacked_claims, held to the contract's UnbackedClaim enum and the
+// column's CHECK by TestEveryUnbackedClaimIsOneTheContractNames.
+const (
+	// UnbackedClaimTransfer: transferring or connecting the caller.
+	UnbackedClaimTransfer = "TRANSFER"
+	// UnbackedClaimLookup: looking something up or checking it.
+	UnbackedClaimLookup = "LOOKUP"
+	// UnbackedClaimMessage: a message or callback request saved.
+	UnbackedClaimMessage = "MESSAGE"
+	// UnbackedClaimFarewell: a goodbye while nothing was ending the call.
+	UnbackedClaimFarewell = "FAREWELL"
+)
+
+// UnbackedClaims is that vocabulary in full.
+var UnbackedClaims = []string{
+	UnbackedClaimTransfer, UnbackedClaimLookup, UnbackedClaimMessage, UnbackedClaimFarewell,
+}
+
 // InsertCDR writes the ledger row, or replaces one that saw less of the call.
 //
 // Retirement runs from more than one place, so a second write for the same
@@ -148,6 +174,10 @@ func (l *LedgerStore) InsertCDR(ctx context.Context, cdr CDR) error {
 	if agentIDs == nil {
 		agentIDs = []uuid.UUID{}
 	}
+	unbackedClaims := cdr.UnbackedClaims
+	if unbackedClaims == nil {
+		unbackedClaims = []string{}
+	}
 
 	params := queries.InsertCDRParams{
 		CallID:         cdr.CallID,
@@ -178,6 +208,7 @@ func (l *LedgerStore) InsertCDR(ctx context.Context, cdr CDR) error {
 		UserData:       userData,
 		Tech:           tech,
 		Legs:           legs,
+		UnbackedClaims: unbackedClaims,
 	}
 
 	// The row and the deliveries it owes go together. A CDR that exists with
@@ -384,6 +415,7 @@ func fromRow(row queries.Cdr) CDR {
 		Disposition:    row.Disposition,
 		IsContained:    row.IsContained,
 		HasRecording:   row.HasRecording,
+		UnbackedClaims: row.UnbackedClaims,
 	}
 	if row.AnsweredAt.Valid {
 		cdr.AnsweredAt = row.AnsweredAt.Time
