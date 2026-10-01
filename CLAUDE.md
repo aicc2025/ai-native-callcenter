@@ -110,7 +110,7 @@ FreeSWITCH gets its directory and `callcenter.conf` from PostgreSQL through mod_
 
 ### Flow DSL (`internal/flow`; fields in `spec.go`, design in `docs/design/02-ai-voice.md` §3 and §6)
 
-- The model owns the conversation; the flow owns the phase. Phases carry instructions and tool allowlists; transitions fire on tool results (conditions can test `result.ok`) and replace the tool's hint with the new phase's instruction. Everything checkable is validated at load, not mid-call.
+- The model owns the conversation; the flow owns the phase. Phases carry instructions and tool allowlists; transitions fire on tool results (conditions can test `result.ok`) and replace the tool's hint with the new phase's instruction. The tools of one response are judged in the phase it was made in (the last move wins), and a move's `announce` waits for that response to end. Everything checkable is validated at load, not mid-call.
 - The flow owns the bot's voice (`global.voice`, versioned with the persona, A7), never an env var; empty falls back to the profile's voice.
 - A phase's `announce` is a line said as written (bilingual, `{slots.x}` rendered): `SessionConfig.OpeningText` for the entry phase, `VoiceSession.SpeakText` after it. A line pre-empts and never queues. It is exact on doubao and best effort elsewhere. How each engine delivers a closing line is a profile trait (`NeedsDirectedLineInConversation`, `PutsTerminalAnnounceInToolResult`, `RequiresTerminalAnnounce`; table in `docs/provider-extension.md`). A deployment's rule (doubao's `RequiresTerminalAnnounce`) is enforced at publish, not at load.
 - A built-in's refusal (a closed queue, a failed save) is a conversation, not an error.

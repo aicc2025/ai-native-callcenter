@@ -177,6 +177,14 @@ func (r *Runtime) CloseAtSessionLimit() string {
 // writes from, and this is wording the flow is not asking anybody to rephrase.
 func (r *Runtime) Announce() string { return r.engine.Announce() }
 
+// BeginToolBatch starts the tool calls of one model response: until
+// EndToolBatch, Dispatch judges each of them in the phase the response was
+// made in (Engine.BeginToolBatch).
+func (r *Runtime) BeginToolBatch() { r.engine.BeginToolBatch() }
+
+// EndToolBatch ends the batch BeginToolBatch started.
+func (r *Runtime) EndToolBatch() { r.engine.EndToolBatch() }
+
 // Dispatch runs a tool the model asked for and returns what to send back.
 //
 // It also reports whether the phase changed, which is what the caller uses to

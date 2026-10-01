@@ -732,6 +732,91 @@ func TestToolAllowlistPerPhase(t *testing.T) {
 	}
 }
 
+// batchFlow's welcome allows three tools, each of which moves the call to a
+// phase that allows none of them.
+const batchFlow = `{
+	"id": "batch-test",
+	"specVersion": "v2",
+	"initialNode": "welcome",
+	"global": {"persona": "You answer the phone."},
+	"nodes": {
+		"welcome": {
+			"instruction": "Greet the caller.",
+			"tools": ["take_message", "transfer_to_agent", "hangup"],
+			"transitions": [
+				{"on": "TOOL_RESULT", "tool": "take_message", "target": "noted"},
+				{"on": "TOOL_RESULT", "tool": "transfer_to_agent", "target": "handoff"},
+				{"on": "TOOL_RESULT", "tool": "hangup", "target": "farewell"}
+			]
+		},
+		"noted": {"instruction": "Ask whether there is anything else.", "tools": []},
+		"handoff": {"instruction": "Announce the transfer.", "tools": []},
+		"farewell": {"instruction": "Say goodbye.", "tools": [], "isTerminal": true}
+	}
+}`
+
+// The tools one response asked for together are judged in the phase the
+// response was made in: the first one's move does not get the second refused,
+// and the second one's rule still fires. The last move wins.
+func TestToolsOfOneResponseAreJudgedInThePhaseItWasMadeIn(t *testing.T) {
+	t.Parallel()
+	e := testEngineFor(t, batchFlow, "en")
+
+	e.BeginToolBatch()
+	if moved := e.OnToolResult("take_message", map[string]any{"ok": "1"}); moved != "noted" {
+		t.Fatalf("take_message moved to %q, want noted", moved)
+	}
+	if !e.IsToolAllowed("transfer_to_agent") {
+		t.Fatal("the second tool of the response was refused by the phase the first moved to")
+	}
+	if moved := e.OnToolResult("transfer_to_agent", map[string]any{"ok": "1"}); moved != "handoff" {
+		t.Fatalf("transfer_to_agent moved to %q, want handoff: the batch's phase has that rule", moved)
+	}
+	e.EndToolBatch()
+
+	if e.NodeID() != "handoff" {
+		t.Errorf("node = %q, want handoff: the last move wins", e.NodeID())
+	}
+	if e.IsToolAllowed("take_message") {
+		t.Error("after the batch a tool is still judged in the phase the batch was made in")
+	}
+}
+
+// Outside a batch nothing changes: each tool is judged where the call stands.
+func TestToolsOfSeparateResponsesAreJudgedWhereTheCallStands(t *testing.T) {
+	t.Parallel()
+	e := testEngineFor(t, batchFlow, "en")
+
+	if moved := e.OnToolResult("take_message", map[string]any{"ok": "1"}); moved != "noted" {
+		t.Fatalf("take_message moved to %q, want noted", moved)
+	}
+	if e.IsToolAllowed("transfer_to_agent") {
+		t.Error("a tool the current phase forbids was allowed outside a batch")
+	}
+}
+
+// A tool of the batch that ended the call is final: a later one still runs,
+// but moves the call nowhere.
+func TestATerminalMoveInABatchIsNotOverridden(t *testing.T) {
+	t.Parallel()
+	e := testEngineFor(t, batchFlow, "en")
+
+	e.BeginToolBatch()
+	if moved := e.OnToolResult("hangup", map[string]any{"ok": "1"}); moved != "farewell" {
+		t.Fatalf("hangup moved to %q, want farewell", moved)
+	}
+	if !e.IsToolAllowed("take_message") {
+		t.Fatal("the second tool of the response was refused")
+	}
+	if moved := e.OnToolResult("take_message", map[string]any{"ok": "1"}); moved != "" {
+		t.Errorf("take_message moved a call that had ended to %q", moved)
+	}
+	e.EndToolBatch()
+	if e.NodeID() != "farewell" {
+		t.Errorf("node = %q, want farewell", e.NodeID())
+	}
+}
+
 func TestInstructionRendersMissingSlotsAsNothing(t *testing.T) {
 	t.Parallel()
 	e := testEngine(t, "en")

@@ -1251,3 +1251,65 @@ func TestAnInterruptOfTheOnlyOpenTurnEndsIt(t *testing.T) {
 		t.Error("the interrupted turn is still counted as responding")
 	}
 }
+
+//
+// Logging.
+//
+
+// lockedBuffer collects log output written from the session's goroutines.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// The orchestrator hands the session a logger that already names the call.
+// Binding callId again wrote the key twice on every session line, and a leg
+// whose ID is not the dialog's Call-ID would put two values under one key.
+func TestTheSessionLogsTheCallIdOnce(t *testing.T) {
+	var out lockedBuffer
+	log := slog.New(slog.NewJSONHandler(&out, nil)).With("callId", "dialog-call-id")
+
+	leg := newFakeLeg(media.LawMu)
+	model := newFakeModel()
+	session, err := New(leg, model, provider.OpenAIProfile(), Config{
+		Session:    provider.SessionConfig{Turn: provider.DefaultTurnDetection()},
+		BargeGuard: -1,
+		NoInput:    -1,
+		Logger:     log,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	if err := session.Start(t.Context()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	session.Close(context.Background())
+
+	var bridged string
+	for line := range strings.SplitSeq(out.String(), "\n") {
+		if strings.Contains(line, `"msg":"ai call bridged"`) {
+			bridged = line
+		}
+	}
+	if bridged == "" {
+		t.Fatalf("no bridged line in %q", out.String())
+	}
+	if n := strings.Count(bridged, `"callId":`); n != 1 {
+		t.Errorf("callId appears %d times: %s", n, bridged)
+	}
+	if !strings.Contains(bridged, `"callId":"dialog-call-id"`) {
+		t.Errorf("the line does not carry the call's own id: %s", bridged)
+	}
+}

@@ -1381,13 +1381,18 @@ type toolPath struct {
 
 func startToolPath(t *testing.T, profile provider.Profile, lang string) *toolPath {
 	t.Helper()
+	return startToolPathWith(t, profile, lang, closingLineFlow)
+}
+
+func startToolPathWith(t *testing.T, profile provider.Profile, lang, flowJSON string) *toolPath {
+	t.Helper()
 	session, leg, model := startBridge(t, profile)
 	awaitBridgeEvent(t, session, EventTypeReady)
 
 	o := testOrchestrator(t, &fakeSwitch{})
 	o.cfg.Profile = profile
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	spec, err := flow.Load([]byte(closingLineFlow))
+	spec, err := flow.Load([]byte(flowJSON))
 	if err != nil {
 		t.Fatalf("load flow: %v", err)
 	}
@@ -1428,6 +1433,38 @@ func (h *toolPath) callTool(t *testing.T, name, args string) toolResult {
 	}
 	t.Fatalf("the %s call was never answered", name)
 	return toolResult{}
+}
+
+// callTools has the model call several tools in one response, as fc_1, fc_2
+// and so on, and waits for all of them to be answered. The response is left
+// open: endResponse ends it.
+func (h *toolPath) callTools(t *testing.T, calls ...[2]string) []toolResult {
+	t.Helper()
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	for i, call := range calls {
+		h.model.events <- provider.Event{
+			Type: provider.EventTypeToolCall, ToolCallID: "fc_" + strconv.Itoa(i+1),
+			ToolName: call[0], ToolArgs: call[1],
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if results := h.model.recordedToolResults(); len(results) == len(calls) {
+			time.Sleep(50 * time.Millisecond)
+			return results
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("the calls were answered %d times, want %d",
+		len(h.model.recordedToolResults()), len(calls))
+	return nil
+}
+
+// endResponse ends the response the tool calls came in, and gives the drive
+// goroutine the moment it needs to follow it up.
+func (h *toolPath) endResponse() {
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	time.Sleep(50 * time.Millisecond)
 }
 
 // playTurn has the model produce one whole turn of speech.
@@ -1649,6 +1686,13 @@ func TestAToolThatEndsTheCallOnDoubaoOrGeminiSpeaksTheLineAsBefore(t *testing.T)
 			if strings.Contains(hint, line) {
 				t.Errorf("hint = %q carries the line; this client speaks it itself", hint)
 			}
+			// The line waits for the response the call came in to end.
+			if got := h.model.spokenLines(); len(got) != 0 {
+				t.Errorf("spoken lines = %v before the response ended, want none", got)
+			}
+
+			h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+			time.Sleep(150 * time.Millisecond)
 			if got := h.model.spokenLines(); len(got) != 1 || got[0] != line {
 				t.Errorf("spoken lines = %v, want [%s]", got, line)
 			}
@@ -1656,9 +1700,6 @@ func TestAToolThatEndsTheCallOnDoubaoOrGeminiSpeaksTheLineAsBefore(t *testing.T)
 				"SendToolResult,UpdateInstructions,SpeakText" {
 				t.Errorf("calls = %v, want the answer, the phase, then the line", got)
 			}
-
-			h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
-			time.Sleep(150 * time.Millisecond)
 			if h.isCallEnded() {
 				t.Fatal("the call ended on the playback of the turn the tool call came in")
 			}
@@ -1680,6 +1721,7 @@ func TestAToolThatMovesIntoALineThatIsNotTheEndIsUnchanged(t *testing.T) {
 			h := startToolPath(t, profile, "en")
 
 			answer := h.callTool(t, flow.ToolTakeMessage, `{"message":"call me back"}`)
+			h.endResponse()
 
 			hint := hintOf(t, answer.output)
 			if !strings.Contains(hint, "Ask whether there is anything else.") {
@@ -1729,5 +1771,116 @@ func TestACutShortTurnIsNotTheClosingLine(t *testing.T) {
 	case <-fired:
 	case <-time.After(time.Second):
 		t.Fatal("speech after a closing line that ran to completion did not fire")
+	}
+}
+
+//
+// Several tools in one response.
+//
+
+// parallelToolsFlow moves on take_message into a phase that allows no tool,
+// with a line of its own.
+const parallelToolsFlow = `{
+	"id": "parallel-tools-test",
+	"specVersion": "v2",
+	"initialNode": "welcome",
+	"global": {"persona": "You answer the phone."},
+	"nodes": {
+		"welcome": {
+			"instruction": "Greet the caller.",
+			"tools": ["take_message", "hangup"],
+			"transitions": [
+				{"on": "TOOL_RESULT", "tool": "take_message", "target": "noted"}
+			]
+		},
+		"noted": {
+			"instruction": "Ask whether there is anything else.",
+			"announce": {"en": "I have taken your message.", "zh": "您的留言已记录。"},
+			"tools": []
+		}
+	}
+}`
+
+// A model can ask for two tools in one response. Both were asked for in the
+// phase the response was made in, so the first one's move must not get the
+// second refused as out of phase (issue #12). And the new phase's line waits
+// until the response is over and both are answered: said at the move, it would
+// pre-empt a response that still owed an answer.
+func TestTheSecondToolOfOneResponseIsNotRefusedByTheFirstsMove(t *testing.T) {
+	for _, profile := range []provider.Profile{
+		provider.OpenAIProfile(), provider.QwenProfile(), provider.DoubaoProfile(),
+		provider.GeminiProfile(),
+	} {
+		t.Run(profile.Name, func(t *testing.T) {
+			h := startToolPathWith(t, profile, "en", parallelToolsFlow)
+
+			answers := h.callTools(t,
+				[2]string{flow.ToolTakeMessage, `{"message":"call me back"}`},
+				[2]string{flow.ToolHangup, `{}`})
+
+			for _, answer := range answers {
+				if !strings.Contains(answer.output, `"ok":"1"`) {
+					t.Errorf("%s answered %s, want ok=1", answer.id, answer.output)
+				}
+			}
+			if h.engine.NodeID() != "noted" {
+				t.Errorf("node = %q, want noted", h.engine.NodeID())
+			}
+			if got := h.model.spokenLines(); len(got) != 0 {
+				t.Errorf("spoken lines = %v while the response was still open, want none", got)
+			}
+
+			h.endResponse()
+			if got := h.model.spokenLines(); len(got) != 1 || got[0] != "I have taken your message." {
+				t.Errorf("spoken lines = %v, want the phase's line once", got)
+			}
+			if got := h.model.recordedCalls(); strings.Join(got, ",") !=
+				"SendToolResult,UpdateInstructions,SendToolResult,SpeakText" {
+				t.Errorf("calls = %v, want both answers ahead of the line", got)
+			}
+		})
+	}
+}
+
+// When two tools of one response each move the call, the last move wins, and
+// its phase's line is the one said: the goodbye, in the result on a Realtime
+// profile and as a line of its own elsewhere, never the earlier phase's line.
+func TestTheLastMoveOfOneResponseWins(t *testing.T) {
+	const goodbye = "Thank you for calling, goodbye."
+	for _, testCase := range []struct {
+		profile       provider.Profile
+		isLineInReply bool
+	}{
+		{provider.OpenAIProfile(), true},
+		{provider.QwenProfile(), true},
+		{provider.DoubaoProfile(), false},
+		{provider.GeminiProfile(), false},
+	} {
+		t.Run(testCase.profile.Name, func(t *testing.T) {
+			h := startToolPath(t, testCase.profile, "en")
+
+			answers := h.callTools(t,
+				[2]string{flow.ToolTakeMessage, `{"message":"call me back"}`},
+				[2]string{flow.ToolHangup, `{}`})
+			h.endResponse()
+
+			if h.engine.NodeID() != "farewell" {
+				t.Fatalf("node = %q, want farewell", h.engine.NodeID())
+			}
+			if !h.actions.isArmed() {
+				t.Error("the call's ending was not armed")
+			}
+			var want []string
+			if testCase.isLineInReply {
+				if got := hintOf(t, answers[1].output); got != provider.SayExactly(goodbye, "en") {
+					t.Errorf("the second answer's hint = %q, want the goodbye", got)
+				}
+			} else {
+				want = []string{goodbye}
+			}
+			if got := h.model.spokenLines(); strings.Join(got, "|") != strings.Join(want, "|") {
+				t.Errorf("spoken lines = %v, want %v", got, want)
+			}
+		})
 	}
 }
