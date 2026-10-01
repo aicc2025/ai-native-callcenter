@@ -67,8 +67,9 @@ type callActions struct {
 	// isEndingLocked says the call's ending has been decided by the platform
 	// (the flow's time limit) and nothing the model does may replace it: arm
 	// keeps what is armed, and the ending tools report success without acting.
-	// Without it a model answering the handover cue with hangup would displace
-	// the transfer, because arming replaces.
+	// Unlike an armed action it outlives the running of that action, so a
+	// model answering the handover cue with hangup after the transfer has run
+	// cannot arm a second ending.
 	isEndingLocked bool
 }
 
@@ -77,6 +78,13 @@ type callActions struct {
 func (a *callActions) TransferToAgent(ctx context.Context, request flow.TransferRequest) (flow.Result, error) {
 	if a.isEndingDecided() {
 		a.log.Info("transfer ignored: the call's time limit has already decided how it ends",
+			"asked", request.Queue)
+		return flow.Succeeded(nil, ""), nil
+	}
+	if a.isArmed() {
+		// The model repeating itself: the ending is already on its way, and a
+		// second transfer would restamp the channel and restart the wait.
+		a.log.Info("transfer ignored: the call's ending is already armed",
 			"asked", request.Queue)
 		return flow.Succeeded(nil, ""), nil
 	}
@@ -202,6 +210,11 @@ func (a *callActions) Hangup(ctx context.Context, _ flow.HangupRequest) (flow.Re
 		a.log.Info("hangup ignored: the call's time limit has already decided how it ends")
 		return flow.Succeeded(nil, ""), nil
 	}
+	if a.isArmed() {
+		// The ending already armed stands, and the ledger keeps its outcome.
+		a.log.Info("hangup ignored: the call's ending is already armed")
+		return flow.Succeeded(nil, ""), nil
+	}
 	if a.recorder != nil {
 		a.recorder.markHangup()
 	}
@@ -215,11 +228,21 @@ func (a *callActions) Hangup(ctx context.Context, _ flow.HangupRequest) (flow.Re
 
 // arm schedules an action for the end of the closing line the model is about
 // to speak, with a cap in case that line never finishes.
+//
+// The first ending armed is the call's ending: arming again while it waits
+// changes nothing. Replacing it moved armedInTurn and restarted the cap on
+// every repeat, so a model that called transfer_to_agent three times waited
+// for a turn after the last call and hit the cap ten seconds after it (#25).
 func (a *callActions) arm(_ context.Context, action func()) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.isEndingLocked {
 		a.log.Info("not arming: the call's time limit has already decided how it ends")
+		return
+	}
+	if a.armed != nil {
+		a.mu.Unlock()
+		a.log.Info("not arming: the call's ending is already armed")
 		return
 	}
 	a.armed = action

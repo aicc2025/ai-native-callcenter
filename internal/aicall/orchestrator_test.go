@@ -173,6 +173,69 @@ func TestTransferWaitsForTheBridgeLineToPlay(t *testing.T) {
 	}
 }
 
+// What a gemini call showed (#25): the model called transfer_to_agent three
+// times, each call re-armed the transfer, and it ran on the cap ten seconds
+// after the last one. The first ending armed is the call's ending: a repeat —
+// or a hangup — in a later turn keeps its turn, its cap and its stamps, and
+// the caller is put through exactly once.
+func TestARepeatedEndingToolCallKeepsTheFirstArming(t *testing.T) {
+	sw := &fakeSwitch{}
+	actions, session, model := testActions(t, sw)
+	const graceCap = 500 * time.Millisecond
+	actions.graceCap = graceCap
+
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	time.Sleep(20 * time.Millisecond)
+	firstTurn := session.currentTurn()
+	armedAt := time.Now()
+	if result, err := actions.TransferToAgent(t.Context(), flow.TransferRequest{
+		Queue: "support", Reason: "BILLING", Summary: "wants a refund",
+	}); err != nil || !result.IsOK {
+		t.Fatalf("transfer refused: %+v %v", result, err)
+	}
+
+	// The next turn calls the tool again, then hangs up for good measure.
+	time.Sleep(200 * time.Millisecond)
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	time.Sleep(50 * time.Millisecond)
+	if session.currentTurn() <= firstTurn {
+		t.Fatal("the fixture did not move on to a later turn")
+	}
+	if result, err := actions.TransferToAgent(t.Context(), flow.TransferRequest{
+		Queue: "support", Reason: "OTHER", Summary: "asked again",
+	}); err != nil || !result.IsOK {
+		t.Fatalf("the repeated transfer was not answered as done: %+v %v", result, err)
+	}
+	if result, err := actions.Hangup(t.Context(), flow.HangupRequest{}); err != nil || !result.IsOK {
+		t.Fatalf("the hangup was not answered as done: %+v %v", result, err)
+	}
+
+	actions.mu.Lock()
+	armedInTurn := actions.armedInTurn
+	actions.mu.Unlock()
+	if armedInTurn != firstTurn {
+		t.Errorf("armed in turn %d, want the first call's turn %d", armedInTurn, firstTurn)
+	}
+	if got := sw.variable("aicc_bot_summary"); got != "wants a refund" {
+		t.Errorf("summary variable = %q, want the first call's", got)
+	}
+
+	// Nothing plays out, so the cap runs it — counted from the first call.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sw.recordedTransfers()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if elapsed := time.Since(armedAt); elapsed >= graceCap+200*time.Millisecond {
+		t.Errorf("the cap ran %v after the first call, want about %v: it was restarted",
+			elapsed, graceCap)
+	}
+	time.Sleep(graceCap)
+	if got := sw.recordedTransfers(); len(got) != 1 || got[0] != "caller-channel-1→7001" {
+		t.Errorf("transfers = %v, want the caller put through once", got)
+	}
+}
+
 // With nowhere to fall back to, an unknown queue is still a refusal — but it
 // is the last resort, not the first answer. See the test below.
 func TestTransferToAnUnknownQueueIsARefusalNotAnError(t *testing.T) {

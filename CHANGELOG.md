@@ -28,6 +28,15 @@ carries the one-line installer's files.
   cause `SESSION_LIMIT` and does not count the call as contained. New metric
   `aicc_bot_session_limits_total{outcome}`.
 
+### Fixed
+
+- AI calls: when the model calls `transfer_to_agent` or `hangup` again while
+  the call's ending is already armed, the first ending stands. A repeat used
+  to replace it, wait for a turn after the latest call and restart the 10 s
+  cap, so the transfer ran ten seconds after the last repeat, and a `hangup`
+  after a transfer could hang up a caller who had been told they were being
+  put through. The repeat is answered as done and changes nothing (#25).
+
 ## v0.2.0 - 2026-09-28
 
 ### Upgrade notes
