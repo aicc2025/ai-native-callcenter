@@ -67,13 +67,17 @@ func TestConnectionDetailsCanBeOverridden(t *testing.T) {
 		t.Errorf("an empty field replaced the model with %q", endpoint.Model)
 	}
 
-	// The vendor serves one qwen realtime model, which is also the default, so
-	// this half checks that an override round-trips, not that it replaces.
-	model, err := ProfileFor(NameQwen, Override{Model: "qwen-audio-3.1-realtime-plus"})
+	// The test never connects, so the model need not exist; it must only differ
+	// from the default, or an ignored override would pass unnoticed.
+	const override = "override-model"
+	if override == QwenProfile().Model {
+		t.Fatalf("the override %q is the default model, so it proves nothing", override)
+	}
+	model, err := ProfileFor(NameQwen, Override{Model: override})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if model.Model != "qwen-audio-3.1-realtime-plus" {
+	if model.Model != override {
 		t.Errorf("model = %q, want the override", model.Model)
 	}
 	if model.Endpoint != QwenProfile().Endpoint {
@@ -81,7 +85,7 @@ func TestConnectionDetailsCanBeOverridden(t *testing.T) {
 	}
 
 	// The model still selects on the connection address, wherever it points.
-	if url := model.endpointURL(); !strings.Contains(url, "model=qwen-audio-3.1-realtime-plus") {
+	if url := model.endpointURL(); !strings.Contains(url, "model="+override) {
 		t.Errorf("connection url %q does not carry the overridden model", url)
 	}
 }
