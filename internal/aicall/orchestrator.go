@@ -642,10 +642,9 @@ func (o *Orchestrator) armTheEnding(moved string, session *Session,
 
 	// Unless the tool that moved us here already armed the call's ending.
 	// A phase is usually terminal *because* of that tool — transfer_to_agent
-	// lands in a "we're putting you through" phase, hangup in a goodbye —
-	// and arming replaces whatever was armed before. So the flow's own
-	// ending displaced the transfer: the bot said an agent would be with
-	// them, then hung up on them instead of putting them through.
+	// lands in a "we're putting you through" phase, hangup in a goodbye.
+	// Arming keeps what is armed, but the flow's own ending would still mark
+	// the ledger a hangup over a transfer, so it is not attempted at all.
 	if actions.isArmed() {
 		log.Info("flow reached a terminal phase; the armed action ends the call",
 			"node", moved)
