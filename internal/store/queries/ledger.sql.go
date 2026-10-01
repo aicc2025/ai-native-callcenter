@@ -164,7 +164,7 @@ func (q *Queries) ExpiredRecordings(ctx context.Context, arg ExpiredRecordingsPa
 }
 
 const getCDR = `-- name: GetCDR :one
-SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec FROM cdrs WHERE call_id = $1
+SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec, unbacked_claims FROM cdrs WHERE call_id = $1
 `
 
 func (q *Queries) GetCDR(ctx context.Context, callID uuid.UUID) (Cdr, error) {
@@ -199,6 +199,7 @@ func (q *Queries) GetCDR(ctx context.Context, callID uuid.UUID) (Cdr, error) {
 		&i.Tech,
 		&i.Legs,
 		&i.BillSec,
+		&i.UnbackedClaims,
 	)
 	return i, err
 }
@@ -341,14 +342,14 @@ INSERT INTO cdrs (
     agent_ids, primary_agent_id,
     ring_sec, bot_sec, queue_wait_sec, talk_sec, bill_sec, total_sec,
     status, hangup_cause, missed_reason, disposition,
-    is_contained, has_recording, user_data, tech, legs
+    is_contained, has_recording, user_data, tech, legs, unbacked_claims
 ) VALUES (
     $1, $2, $3, $4, $5, $6,
     $7, $8, $9, $10, $11,
     $12, $13,
     $14, $15, $16, $17, $18, $19,
     $20, $21, $22, $23,
-    $24, $25, $26, $27, $28
+    $24, $25, $26, $27, $28, $29
 ) ON CONFLICT (call_id) DO UPDATE SET
     started_at = EXCLUDED.started_at,
     answered_at = EXCLUDED.answered_at,
@@ -376,7 +377,8 @@ INSERT INTO cdrs (
     has_recording = EXCLUDED.has_recording,
     user_data = EXCLUDED.user_data,
     tech = EXCLUDED.tech,
-    legs = EXCLUDED.legs
+    legs = EXCLUDED.legs,
+    unbacked_claims = EXCLUDED.unbacked_claims
 WHERE EXCLUDED.ended_at > cdrs.ended_at
 `
 
@@ -409,6 +411,7 @@ type InsertCDRParams struct {
 	UserData       []byte             `json:"userData"`
 	Tech           []byte             `json:"tech"`
 	Legs           []byte             `json:"legs"`
+	UnbackedClaims []string           `json:"unbackedClaims"`
 }
 
 // SPDX-License-Identifier: Apache-2.0
@@ -464,6 +467,7 @@ func (q *Queries) InsertCDR(ctx context.Context, arg InsertCDRParams) (int64, er
 		arg.UserData,
 		arg.Tech,
 		arg.Legs,
+		arg.UnbackedClaims,
 	)
 	if err != nil {
 		return 0, err
@@ -758,7 +762,7 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 }
 
 const listCDRs = `-- name: ListCDRs :many
-SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec FROM cdrs
+SELECT call_id, started_at, answered_at, ended_at, call_type, language, from_number, to_number, did, flow_id, queue_id, agent_ids, primary_agent_id, ring_sec, bot_sec, queue_wait_sec, talk_sec, total_sec, status, hangup_cause, missed_reason, disposition, is_contained, has_recording, user_data, tech, legs, bill_sec, unbacked_claims FROM cdrs
 WHERE ($1::timestamptz IS NULL OR started_at >= $1)
   AND ($2::timestamptz IS NULL OR started_at < $2)
   AND ($3::uuid IS NULL OR queue_id = $3)
@@ -831,6 +835,7 @@ func (q *Queries) ListCDRs(ctx context.Context, arg ListCDRsParams) ([]Cdr, erro
 			&i.Tech,
 			&i.Legs,
 			&i.BillSec,
+			&i.UnbackedClaims,
 		); err != nil {
 			return nil, err
 		}

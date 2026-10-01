@@ -33,6 +33,7 @@ var (
 	providerExpired  metric.Int64Counter
 	botInterruptions metric.Int64Counter
 	botSessionLimits metric.Int64Counter
+	botUnbacked      metric.Int64Counter
 
 	transcribeFramesDropped metric.Int64Counter
 	transcribeFramesSent    metric.Int64Counter
@@ -106,6 +107,12 @@ func init() {
 			"flow's time limit (global.maxDurationSec), by how: TRANSFER, counted "+
 			"when the transfer to the number's queue is armed (not when it completes), "+
 			"or HANGUP when no queue was open."))
+	botUnbacked, _ = meter.Int64Counter("aicc_bot_unbacked_claims_total",
+		metric.WithDescription("Bot turns that told the caller of an action no tool call "+
+			"backed, by claim (TRANSFER, LOOKUP, MESSAGE, FAREWELL) and provider. Read "+
+			"from the bot's own transcript, so a signal rather than proof; counted before "+
+			"anything acts on it, and labelled by provider to say whether one engine "+
+			"does it and the others do not."))
 	botInterruptions, _ = meter.Int64Counter("aicc_bot_interruptions_total",
 		metric.WithDescription("Times a caller took the floor back from the bot, by what "+
 			"took it: SPEECH or DTMF. Speech inside the barge-in guard is not counted — "+
@@ -212,6 +219,22 @@ func RecordSessionLimit(outcome string) {
 	}
 	botSessionLimits.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// RecordUnbackedClaim counts one bot turn that claimed an action — a
+// transfer, a lookup, a saved message, a goodbye — with no tool call behind
+// it (#44).
+//
+// The flow cannot see such a turn: it moves on tool results and silence, and
+// a claim is neither. What an operator asks is how often it happens and on
+// which engine, and the answer decides whether the prompt is enough or the
+// platform must step in; one occurrence answers neither.
+func RecordUnbackedClaim(claim, provider string) {
+	if botUnbacked == nil {
+		return
+	}
+	botUnbacked.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("claim", claim), attribute.String("provider", provider)))
 }
 
 // RecordProviderSessionStarted counts one conversation session being opened.

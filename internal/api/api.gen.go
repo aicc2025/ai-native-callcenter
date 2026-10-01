@@ -784,6 +784,30 @@ func (e TranscriptionState) Valid() bool {
 	}
 }
 
+// Defines values for UnbackedClaim.
+const (
+	UnbackedClaimFAREWELL UnbackedClaim = "FAREWELL"
+	UnbackedClaimLOOKUP   UnbackedClaim = "LOOKUP"
+	UnbackedClaimMESSAGE  UnbackedClaim = "MESSAGE"
+	UnbackedClaimTRANSFER UnbackedClaim = "TRANSFER"
+)
+
+// Valid indicates whether the value is a known member of the UnbackedClaim enum.
+func (e UnbackedClaim) Valid() bool {
+	switch e {
+	case UnbackedClaimFAREWELL:
+		return true
+	case UnbackedClaimLOOKUP:
+		return true
+	case UnbackedClaimMESSAGE:
+		return true
+	case UnbackedClaimTRANSFER:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserStatus.
 const (
 	UserStatusACTIVE    UserStatus = "ACTIVE"
@@ -1084,8 +1108,11 @@ type CDR struct {
 	// TotalSec Seconds from startedAt to endedAt, the whole life of the call including the time before it was answered. Not the billable duration; see billSec.
 	//
 	// The other durations do not partition this one. botSec, queueWaitSec, ringSec and talkSec each measure a stretch of the call in its own terms and those stretches overlap — ringing happens inside the queue's window, most obviously — so subtracting them from totalSec to find unaccounted time yields a number that means nothing. Adding them can exceed totalSec on a perfectly ordinary call. The three the caller passes through in order — botSec, queueWaitSec, talkSec — are consecutive and do fit.
-	TotalSec int                     `json:"totalSec"`
-	UserData *map[string]interface{} `json:"userData,omitempty"`
+	TotalSec int `json:"totalSec"`
+
+	// UnbackedClaims Each kind of claim the bot made with no tool call behind it, once. Absent when it made none. It changes nothing about the call: a call can be contained and still carry one, and a containment figure that should not count a caller who was told something that never happened leaves such calls out.
+	UnbackedClaims *[]UnbackedClaim        `json:"unbackedClaims,omitempty"`
+	UserData       *map[string]interface{} `json:"userData,omitempty"`
 
 	// WrapUp The after-call work filed for this call: the requesting agent's own on GET /cdrs/mine, the primary agent's (else the latest) elsewhere. Absent when nobody filed one.
 	WrapUp *WrapUp `json:"wrapUp,omitempty"`
@@ -2018,6 +2045,9 @@ type Trunk struct {
 	// State The switch's own word — REGED, NOREG, DOWN, FAIL_WAIT. Passed through rather than mapped: a trunk down for a reason the switch has a name for should say that name.
 	State string `json:"state"`
 }
+
+// UnbackedClaim Something the bot told the caller it was doing, or had done, in a turn with no tool call behind it: TRANSFER (transferring or connecting them), LOOKUP (looking something up), MESSAGE (a message or callback request saved), FAREWELL (a goodbye while nothing was ending the call). Detected from the bot's own transcript, so it is a signal to look at the call, not proof: a claim the platform cannot read is not flagged, and a phrasing it misreads can be.
+type UnbackedClaim string
 
 // User An account, with the agent identity and phone that belong to it when it has them.
 type User struct {

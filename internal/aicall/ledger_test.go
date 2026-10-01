@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -152,7 +153,8 @@ func TestATransferredCallStillWritesTheRowItKnows(t *testing.T) {
 	recorder, transcripts, flushTranscript := recorderWithTranscript(t, callID, time.Now())
 
 	recorder.say(store.SpeakerCustomer, "转人工")
-	recorder.markTransferred(queueID)
+	recorder.markTransferred()
+	recorder.markHandedOver(queueID)
 
 	recorder.finish(ledger, testFacts(), discard())
 
@@ -173,6 +175,55 @@ func TestATransferredCallStillWritesTheRowItKnows(t *testing.T) {
 	flushTranscript()
 	if len(transcripts.get(callID)) != 1 {
 		t.Error("the transcript was lost with the transfer")
+	}
+}
+
+// A transfer the tool accepted but the switch was never told to make — the
+// caller hung up during the closing line, or the model hung up over it — is
+// not a queue call. Written with the queue, the row counted in the queue's
+// figures as answered with no wait (fujiezee on #44; 01a0bc55 and 01a0bd1e
+// on the dev stack).
+func TestATransferNeverHandedOverNamesNoQueue(t *testing.T) {
+	ledger := newFakeLedger()
+	recorder := newCallRecorder(uuid.New(), time.Now(), nil)
+
+	recorder.markTransferred()
+	recorder.finish(ledger, testFacts(), discard())
+
+	if len(ledger.cdrs) != 1 {
+		t.Fatalf("wrote %d cdrs", len(ledger.cdrs))
+	}
+	cdr := ledger.cdrs[0]
+	if cdr.QueueID != nil {
+		t.Errorf("queueId = %v for a caller who never reached the queue", *cdr.QueueID)
+	}
+	if cdr.IsContained {
+		t.Error("a call the bot decided to hand on was marked contained")
+	}
+}
+
+// A claim the bot made with no tool call behind it reaches the row, each kind
+// once and in a stable order.
+func TestUnbackedClaimsReachTheRow(t *testing.T) {
+	ledger := newFakeLedger()
+	recorder := newCallRecorder(uuid.New(), time.Now(), nil)
+
+	recorder.markUnbackedClaim(store.UnbackedClaimTransfer)
+	recorder.markUnbackedClaim(store.UnbackedClaimLookup)
+	recorder.markUnbackedClaim(store.UnbackedClaimTransfer)
+	recorder.markHangup()
+	recorder.finish(ledger, testFacts(), discard())
+
+	got := ledger.cdrs[0].UnbackedClaims
+	want := []string{store.UnbackedClaimLookup, store.UnbackedClaimTransfer}
+	if !slices.Equal(got, want) {
+		t.Errorf("unbackedClaims = %v, want %v", got, want)
+	}
+
+	clean := newFakeLedger()
+	newCallRecorder(uuid.New(), time.Now(), nil).finish(clean, testFacts(), discard())
+	if claims := clean.cdrs[0].UnbackedClaims; claims != nil {
+		t.Errorf("a call with no claims wrote %v", claims)
 	}
 }
 

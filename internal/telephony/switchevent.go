@@ -6,6 +6,7 @@
 package telephony
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasonyang/ai-native-callcenter/internal/esl"
+	"github.com/rasonyang/ai-native-callcenter/internal/store"
 )
 
 // SwitchEventKind is the normalized event vocabulary. FreeSWITCH names never
@@ -74,6 +76,9 @@ type BotShare struct {
 	Queue    string
 	Summary  string
 	Reason   string
+	// UnbackedClaims is each kind of claim the bot made with no tool call
+	// behind it, stamped at the handover.
+	UnbackedClaims []string
 	// IsStamped records that the bot wrote its share onto the caller's
 	// channel, which it does when it hands the call to a person and at no
 	// other time. It is not the same as any field being set: the dialplan
@@ -128,6 +133,9 @@ func (b *BotShare) Merge(other BotShare) {
 	if b.Reason == "" {
 		b.Reason = other.Reason
 	}
+	if len(b.UnbackedClaims) == 0 {
+		b.UnbackedClaims = other.UnbackedClaims
+	}
 	if !b.IsStamped {
 		b.IsStamped = other.IsStamped
 	}
@@ -169,6 +177,21 @@ func botShareFrom(get func(string) string) BotShare {
 	out.Queue = get("aicc_queue")
 	out.Summary = get("aicc_bot_summary")
 	out.Reason = get("aicc_bot_reason")
+	out.UnbackedClaims = unbackedClaimsFrom(get("aicc_bot_unbacked_claims"))
+	return out
+}
+
+// unbackedClaimsFrom reads the bot's comma-joined claims, keeping only the
+// kinds the ledger knows. The column's CHECK refuses any other, and refuses
+// the whole row with it: one stray word would lose the call from the ledger.
+func unbackedClaimsFrom(raw string) []string {
+	var out []string
+	for _, kind := range strings.Split(raw, ",") {
+		kind = strings.TrimSpace(kind)
+		if slices.Contains(store.UnbackedClaims, kind) && !slices.Contains(out, kind) {
+			out = append(out, kind)
+		}
+	}
 	return out
 }
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -681,6 +682,43 @@ func TestTheBotLegOfATransferredCallNamesTheFlow(t *testing.T) {
 	}
 	if bot.Label != "mobile_support" {
 		t.Errorf("BOT leg label = %q, want mobile_support", bot.Label)
+	}
+}
+
+// The claims the bot made with no tool call behind it travel with the caller:
+// stamped on their channel at the handover, read back here, and on the row
+// the human path writes. A word the ledger does not know is dropped rather
+// than carried, because the column's CHECK would refuse the whole row for it.
+func TestATransferredCallKeepsTheBotsUnbackedClaims(t *testing.T) {
+	t.Parallel()
+	vars := map[string]string{
+		"aicc_bot_sec":             "20",
+		"aicc_bot_unbacked_claims": "TRANSFER,PROMISE, LOOKUP,TRANSFER",
+	}
+	share := botShareFrom(func(name string) string { return vars[name] })
+	if want := []string{"TRANSFER", "LOOKUP"}; !slices.Equal(share.UnbackedClaims, want) {
+		t.Fatalf("read %v from the channel, want %v", share.UnbackedClaims, want)
+	}
+
+	// The bot leg hangs up first and knows only the DID; the caller's leg
+	// brings the rest.
+	merged := BotShare{DID: "95001"}
+	merged.Merge(share)
+	snap := Snapshot{
+		CallID: uuid.New(), CallType: events.CallTypeInbound,
+		CreatedAt: at(0), EndedAt: atPtr(60),
+		Bot: merged,
+		Parties: []PartySnapshot{
+			{Role: RoleOriginator, Number: "18688886669", AnsweredAt: atPtr(0), ReleasedAt: atPtr(60)},
+		},
+	}
+	cdr := newAssembler(&memoryLedger{}, staticQueues{}).assemble(t.Context(), snap)
+	if want := []string{"TRANSFER", "LOOKUP"}; !slices.Equal(cdr.UnbackedClaims, want) {
+		t.Errorf("unbackedClaims = %v, want %v", cdr.UnbackedClaims, want)
+	}
+
+	if none := botShareFrom(func(string) string { return "" }); none.UnbackedClaims != nil {
+		t.Errorf("a channel with no stamp read as %v", none.UnbackedClaims)
 	}
 }
 

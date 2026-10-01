@@ -359,6 +359,7 @@ func (a *CDRAssembler) assemble(ctx context.Context, snap Snapshot) store.CDR {
 	} else {
 		cdr.Legs = buildLegs(snap, originator, agentLegs, cdr.BotSec)
 	}
+	cdr.UnbackedClaims = snap.Bot.UnbackedClaims
 	if snap.Bot.Summary != "" {
 		if cdr.UserData == nil {
 			cdr.UserData = map[string]any{}

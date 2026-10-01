@@ -5,7 +5,10 @@ package aicall
 import (
 	"context"
 	"log/slog"
+	"maps"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +48,9 @@ type callRecorder struct {
 	mu sync.Mutex
 
 	isTransferred bool
+	// transferQueue is the queue the caller was handed to, set when the
+	// switch was told to move them and not when the tool accepted the
+	// transfer (markHandedOver).
 	transferQueue *uuid.UUID
 	// endReason distinguishes how the conversation closed, for containment:
 	// "" (caller hung up or failure), "HANGUP" (the bot closed it properly),
@@ -55,6 +61,9 @@ type callRecorder struct {
 	// call: it ran out of the flow's time budget. Such a call is never
 	// contained (03-data: is_contained), however it closed.
 	isSessionLimited bool
+	// unbackedClaims is each kind of claim the bot made with no tool call
+	// behind it (claimWatch).
+	unbackedClaims map[string]bool
 }
 
 func newCallRecorder(callID uuid.UUID, startedAt time.Time, actor *transcript.Actor) *callRecorder {
@@ -117,12 +126,49 @@ func (r *callRecorder) add(speaker, kind, text string, content map[string]any) {
 	})
 }
 
-func (r *callRecorder) markTransferred(queueID uuid.UUID) {
+// markTransferred records the decision to hand the caller to a person. It
+// names no queue: the decision is not the handover (markHandedOver).
+func (r *callRecorder) markTransferred() {
 	r.mu.Lock()
 	r.isTransferred = true
-	r.transferQueue = &queueID
 	r.endReason = "TRANSFER"
 	r.mu.Unlock()
+}
+
+// markHandedOver records the queue the caller was actually sent to, at the
+// moment the switch is told to move them.
+//
+// At the decision it was too early. The transfer waits for the closing line,
+// and in between the caller can hang up or the model can call hangup over it;
+// the row this path then writes kept the queue all the same, and a call that
+// never reached the queue was counted as one of the queue's calls — answered
+// (the bot answered it) with no wait, so inside the service level too. A row
+// with a queue is a caller who went there.
+func (r *callRecorder) markHandedOver(queueID uuid.UUID) {
+	r.mu.Lock()
+	r.transferQueue = &queueID
+	r.mu.Unlock()
+}
+
+// markUnbackedClaim records one kind of claim the bot made with no tool call
+// behind it.
+func (r *callRecorder) markUnbackedClaim(kind string) {
+	r.mu.Lock()
+	if r.unbackedClaims == nil {
+		r.unbackedClaims = map[string]bool{}
+	}
+	r.unbackedClaims[kind] = true
+	r.mu.Unlock()
+}
+
+// unbackedClaimList is the kinds markUnbackedClaim recorded, sorted, or nil.
+func (r *callRecorder) unbackedClaimList() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.unbackedClaims) == 0 {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(r.unbackedClaims))
 }
 
 func (r *callRecorder) markHangup() {
@@ -173,6 +219,7 @@ func (r *callRecorder) finish(ledger Ledger, call *callFacts, log *slog.Logger) 
 	transferQueue := r.transferQueue
 	isSessionLimited := r.isSessionLimited
 	r.mu.Unlock()
+	unbackedClaims := r.unbackedClaimList()
 
 	// A transferred call is normally the human path's row to write, and this
 	// one is provisional: it is replaced the moment that path writes, because
@@ -234,9 +281,10 @@ func (r *callRecorder) finish(ledger Ledger, call *callFacts, log *slog.Logger) 
 		// not because the platform's time limit made it.
 		IsContained: status == store.CDRStatusAnswered && endReason == "HANGUP" &&
 			!isSessionLimited,
-		HasRecording: call.isRecordingEnabled,
-		UserData:     call.userData,
-		Tech:         call.tech,
+		HasRecording:   call.isRecordingEnabled,
+		UnbackedClaims: unbackedClaims,
+		UserData:       call.userData,
+		Tech:           call.tech,
 		Legs: []store.Leg{{
 			Kind:        "BOT",
 			Label:       call.flowSlug,
@@ -307,4 +355,12 @@ func (a *callActions) stampBotShare(facts *callFacts) {
 func (a *callActions) stampBotSec(recorder *callRecorder) {
 	botSec := int(time.Since(recorder.answeredAt).Seconds())
 	a.stampChannel("aicc_bot_sec", strconv.Itoa(botSec))
+}
+
+// stampUnbackedClaims writes the claims the bot made with no tool call behind
+// them onto the caller's channel, so the row the human path writes after the
+// handover carries them as the bot's own row would have. At the handover, for
+// the reason stampBotSec gives: the closing line is still the bot's to say.
+func (a *callActions) stampUnbackedClaims(recorder *callRecorder) {
+	a.stampChannel("aicc_bot_unbacked_claims", strings.Join(recorder.unbackedClaimList(), ","))
 }

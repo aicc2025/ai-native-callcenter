@@ -387,6 +387,12 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 	budget sessionBudget, log *slog.Logger) {
 
 	wall := turnsWithoutToolWatch{toolCallTurn: -1}
+	var claims claimWatch
+	reportClaims := func(turn int, found []claim) {
+		for _, c := range found {
+			o.reportUnbackedClaim(turn, c, recorder, log)
+		}
+	}
 	// deadline is when the limit falls due, fixed once: the wrap-up steer
 	// counts the time left from it whenever the instructions are rendered.
 	deadline := time.Now().Add(budget.limitAfter)
@@ -452,6 +458,7 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 			case EventTypeBotSaid:
 				if event.IsFinal {
 					recorder.say(store.SpeakerBot, event.Text)
+					reportClaims(event.Turn, claims.onBotSaid(event.Turn, event.Text))
 				}
 
 			case EventTypeDigit:
@@ -474,6 +481,8 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 				o.handleDeadAir(session, runtime, actions, log)
 
 			case EventTypeTurnDone:
+				reportClaims(event.Turn, claims.onTurnDone(event.Turn,
+					event.Turn == wall.toolCallTurn, actions.isArmed()))
 				actions.onTurnDone(event.Turn, event.IsInterrupted)
 				wall.onTurnDone(event.Turn, event.IsInterrupted, runtime)
 				o.closeToolBatch(&batch, session, runtime, log)
@@ -518,6 +527,20 @@ func (o *Orchestrator) drive(ctx context.Context, session *Session,
 			}
 		}
 	}
+}
+
+// reportUnbackedClaim records a claim the bot made with no tool call behind
+// it (claimWatch). It changes nothing about the call: it is counted, logged
+// and written to the call's record, so the rate can be measured — and the
+// engines compared — before anything is made to act on it (#44). The log
+// carries the words that matched and not the line, which is the transcript's
+// to keep.
+func (o *Orchestrator) reportUnbackedClaim(turn int, c claim, recorder *callRecorder,
+	log *slog.Logger) {
+	log.Warn("the bot claimed an action no tool call backs",
+		"claim", c.kind, "turn", turn, "phrase", c.phrase)
+	obs.RecordUnbackedClaim(c.kind, o.cfg.Profile.Name)
+	recorder.markUnbackedClaim(c.kind)
 }
 
 // hangupCauseMediaOrProvider is what a failed AI call has always been released
