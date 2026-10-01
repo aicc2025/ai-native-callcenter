@@ -709,6 +709,11 @@ func (s *Session) isHoldingTheFloor() bool {
 		(s.framesQueued > 0 && s.leg.Pending() > 0)
 }
 
+// queuedPlayout is how long the audio queued for the caller takes to play.
+func (s *Session) queuedPlayout() time.Duration {
+	return time.Duration(s.leg.Pending()) * frameDurationMs * time.Millisecond
+}
+
 // currentTurn reports which model turn is in progress.
 func (s *Session) currentTurn() int {
 	s.mu.Lock()

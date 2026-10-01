@@ -1372,6 +1372,7 @@ const closingLineFlow = `{
 // deployment running a given provider.
 type toolPath struct {
 	session *Session
+	leg     *fakeLeg
 	model   *fakeModel
 	actions *callActions
 	engine  *flow.Engine
@@ -1385,7 +1386,7 @@ func startToolPath(t *testing.T, profile provider.Profile, lang string) *toolPat
 
 func startToolPathWith(t *testing.T, profile provider.Profile, lang, flowJSON string) *toolPath {
 	t.Helper()
-	session, _, model := startBridge(t, profile)
+	session, leg, model := startBridge(t, profile)
 	awaitBridgeEvent(t, session, EventTypeReady)
 
 	o := testOrchestrator(t, &fakeSwitch{})
@@ -1403,7 +1404,7 @@ func startToolPathWith(t *testing.T, profile provider.Profile, lang, flowJSON st
 	actions.recorder = recorder
 	runtime := flow.NewRuntime(engine, actions, flow.NewBackend(""), nil, log)
 
-	h := &toolPath{session: session, model: model, actions: actions,
+	h := &toolPath{session: session, leg: leg, model: model, actions: actions,
 		engine: engine, done: make(chan struct{})}
 	go func() {
 		defer close(h.done)
@@ -1603,6 +1604,52 @@ func TestAClosingLineCutShortEndsTheCallOnlyAtTheCap(t *testing.T) {
 		t.Fatal("the call ended on speech over a closing line that was never said")
 	}
 	h.awaitCallEnded(t, 2*time.Second)
+}
+
+// The closing line plays behind the rest of the turn that carried the tool
+// call, which can go on speaking for seconds after it. The cap started at
+// arming cut the line's tail off (issue #24): once the line has been
+// generated, the cap covers the audio queued ahead of it, and the call ends
+// when the caller has heard the line, not before.
+func TestAClosingLineQueuedBehindTheToolCallsTurnIsHeardBeforeTheCap(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+	h.actions.graceCap = 500 * time.Millisecond
+
+	// The turn keeps speaking after the tool call, and its audio is still
+	// queued when the line — the tool result's turn — finishes generating.
+	h.callTool(t, flow.ToolHangup, `{}`)
+	h.model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2),
+	}
+	h.leg.holdFrames(100)
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.playTurn()
+
+	time.Sleep(700 * time.Millisecond)
+	if h.isCallEnded() || !h.actions.isArmed() {
+		t.Fatal("the call ended on the cap counted from arming while the line was still queued")
+	}
+
+	h.leg.holdFrames(0)
+	h.awaitCallEnded(t, 500*time.Millisecond)
+}
+
+// A line that was generated but never finishes playing still ends the call:
+// the moved cap covers the queued audio and a margin, and no more.
+func TestAClosingLineThatNeverFinishesPlayingStillEndsTheCall(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+	h.actions.graceCap = 100 * time.Millisecond
+
+	h.callTool(t, flow.ToolHangup, `{}`)
+	h.leg.holdFrames(5)
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.playTurn()
+
+	time.Sleep(lineDrainMargin / 2)
+	if h.isCallEnded() {
+		t.Fatal("the call ended before the queued line and its margin could play")
+	}
+	h.awaitCallEnded(t, lineDrainMargin)
 }
 
 // On doubao and gemini the line is its own turn, exactly as before: the tool

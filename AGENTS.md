@@ -119,7 +119,7 @@ FreeSWITCH gets its directory and `callcenter.conf` from PostgreSQL through mod_
 
 ## Invariants from live debugging: do not regress
 
-- **Turn end ≠ playback end.** `TURN_DONE` means the model stopped producing; `PLAYBACK_DONE` means the caller heard it. An armed transfer or hangup executes after the caller heard its turn (gated on turn identity), or when the caller speaks after a later turn has finished generating; the cap is 10 s from arming. A turn cut short never counts as the closing line having been said.
+- **Turn end ≠ playback end.** `TURN_DONE` means the model stopped producing; `PLAYBACK_DONE` means the caller heard it. An armed transfer or hangup executes after the caller heard its turn (gated on turn identity), or when the caller speaks after a later turn has finished generating; the cap is 10 s from arming, moved out once the line has finished generating to cover the audio still queued plus 2 s (never earlier). A turn cut short never counts as the closing line having been said.
 - **Barge-in's boundary is the last frame heard.** Speech over a finished turn's still-playing tail is an interruption: flush locally and trim the history (`conversation.item.truncate`), but never send `response.cancel` after generation has ended; the providers reject it.
 - The drain watch and the dead-air timer use **separate** generation counters; sharing one made every goodbye end on the grace cap.
 - An interrupt flushes the local TX queue first, then tells the provider; played time = frames queued − frames flushed. A keypress always interrupts; detected speech inside the 800 ms barge guard is ignored (line echo).

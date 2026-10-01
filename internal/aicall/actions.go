@@ -59,8 +59,11 @@ type callActions struct {
 	// talked over) is not the line, and counting it let a barge-in fire the
 	// action while the real line was still being generated.
 	isLineSpoken bool
-	// armedGeneration lets the cap timer recognise the action it belongs to.
+	// armedGeneration lets a cap timer recognise the action it belongs to, and
+	// retires the timer when the cap is moved.
 	armedGeneration int
+	// capDue is when the running cap fires.
+	capDue time.Time
 	// isEndingLocked says the call's ending has been decided by the platform
 	// (the flow's time limit) and nothing the model does may replace it: arm
 	// keeps what is armed, and the ending tools report success without acting.
@@ -211,35 +214,53 @@ func (a *callActions) Hangup(ctx context.Context, _ flow.HangupRequest) (flow.Re
 // to speak, with a cap in case that line never finishes.
 func (a *callActions) arm(_ context.Context, action func()) {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.isEndingLocked {
-		a.mu.Unlock()
 		a.log.Info("not arming: the call's time limit has already decided how it ends")
 		return
 	}
 	a.armed = action
 	a.armedInTurn = a.session.currentTurn()
 	a.isLineSpoken = false
-	a.armedGeneration++
-	generation := a.armedGeneration
-	a.mu.Unlock()
-
 	graceCap := a.graceCap
 	if graceCap <= 0 {
 		graceCap = actionGraceCap
 	}
-	time.AfterFunc(graceCap, func() {
-		a.mu.Lock()
-		isStillArmed := a.armed != nil && a.armedGeneration == generation
-		armed := a.armed
-		if isStillArmed {
-			a.armed = nil
-		}
-		a.mu.Unlock()
-		if isStillArmed {
-			a.log.Warn("running an armed action at the cap; playback never finished")
-			armed()
-		}
-	})
+	a.startCapLocked(graceCap)
+}
+
+// startCapLocked (re)starts the cap, retiring any timer already running.
+func (a *callActions) startCapLocked(after time.Duration) {
+	a.armedGeneration++
+	generation := a.armedGeneration
+	a.capDue = time.Now().Add(after)
+	time.AfterFunc(after, func() { a.runAtCap(generation) })
+}
+
+// runAtCap runs the armed action when its closing line has not been heard in
+// time. The two ways to get here are told apart: a line that was never
+// generated is a provider that went quiet, while a line generated but not
+// heard is playback that ran past the cap's estimate.
+func (a *callActions) runAtCap(generation int) {
+	a.mu.Lock()
+	armed := a.armed
+	isStillArmed := armed != nil && a.armedGeneration == generation
+	isLineSpoken := a.isLineSpoken
+	if isStillArmed {
+		a.armed = nil
+	}
+	a.mu.Unlock()
+	if !isStillArmed {
+		return
+	}
+	if isLineSpoken {
+		a.log.Warn("running an armed action at the cap; the closing line was generated " +
+			"but its playback had not finished")
+	} else {
+		a.log.Warn("running an armed action at the cap; no closing line was generated " +
+			"after the action was armed")
+	}
+	armed()
 }
 
 // isArmed reports whether an action is already waiting for the closing line.
@@ -325,12 +346,24 @@ func (a *callActions) onPlaybackDone(turn int) {
 
 // onTurnDone records that the closing line has finished generating. A turn
 // that was cut short is not the line, whichever turn it was.
+//
+// The line's length is known from here on, so the cap is moved to cover it.
+// The cap started at arming, but the line plays behind whatever is still
+// queued: the turn that carried the tool call can go on speaking for seconds
+// after the call, and a cap counted from arming then cut the tail of the line
+// off (issue #24). The cap only ever moves later; a line that fits inside it
+// keeps the original.
 func (a *callActions) onTurnDone(turn int, isInterrupted bool) {
 	a.mu.Lock()
-	if a.armed != nil && turn > a.armedInTurn && !isInterrupted {
-		a.isLineSpoken = true
+	defer a.mu.Unlock()
+	if a.armed == nil || turn <= a.armedInTurn || isInterrupted || a.isLineSpoken {
+		return
 	}
-	a.mu.Unlock()
+	a.isLineSpoken = true
+	playout := a.session.queuedPlayout() + lineDrainMargin
+	if due := time.Now().Add(playout); due.After(a.capDue) {
+		a.startCapLocked(playout)
+	}
 }
 
 // onBargeIn fires the armed action when the caller talks over or after the
