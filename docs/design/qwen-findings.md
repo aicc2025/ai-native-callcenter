@@ -757,6 +757,7 @@ the decision below — one function tool). **MEASURED:**
 | Tool call | `response.output_item.added` (`function_call`) → `response.function_call_arguments.done` → `response.done`; `function_call_output` + `response.create` → spoken turn |
 | `response.cancel` on an open response | `response.done status=cancelled`, `status_details.reason client_cancelled` |
 | `conversation.item.truncate` after the cancel | no acknowledgement and no error within 3 s |
+| `conversation.item.truncate` with `audio_end_ms` 0 or 300 after a completed response (2026-10-01, `TestLiveQwenTruncate`, 3 runs each) | no acknowledgement and no error; asked to repeat its last sentence, the model recites it in full every time, as it does with no truncate. The truncate does not trim the text the model reads back, so on qwen it cannot tell the model a line went unheard (#53) |
 | `response.cancel` with nothing open | `error invalid_value "Conversation has no active response."` — the text `isAnsweredCancel` matches |
 | `smart_turn` with `silence_duration_ms 500` | echoed back as 2000 — `SemanticTurnSilenceMs` true |
 | `voice longanqian_v3.1` / `beth_v3.1` | accepted |

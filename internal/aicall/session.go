@@ -519,7 +519,13 @@ func (s *Session) handleModelEvent(event provider.Event) {
 		// reached the caller — only this side counts frames. When we have
 		// already flushed, this is a no-op: nothing was queued, so nothing
 		// was heard, so there is nothing to say.
-		if playedMs := s.stopPlayback(isCurrent); playedMs > 0 {
+		//
+		// "Nothing was queued" is not "nothing was heard": a turn whose audio
+		// sat behind an earlier turn's tail and was flushed unplayed has
+		// played 0 ms and must be trimmed to 0, or the model's history keeps
+		// an answer nobody received. Only a turn with no queued audio at all
+		// (already flushed by a barge-in) stays silent.
+		if playedMs, hadQueued := s.stopPlayback(isCurrent); hadQueued {
 			// Said out loud for the same reason the caller-initiated case is:
 			// an interruption that leaves no trace cannot be told apart
 			// afterwards from one that never happened. This path reports the
@@ -615,7 +621,7 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 		}
 	}
 
-	playedMs := s.stopPlayback(true)
+	playedMs, _ := s.stopPlayback(true)
 	// The provider is told whenever the caller stopped hearing something, not
 	// only while it was still producing. Its history is a record of what was
 	// said to the caller, and an utterance the caller never heard has to come
@@ -648,14 +654,17 @@ func (s *Session) tellTheModelWhatWasHeard(reason provider.InterruptReason, play
 	}
 }
 
-// stopPlayback drops queued speech and reports how much the caller heard.
+// stopPlayback drops queued speech and reports how much the caller heard, and
+// whether the turn had queued any audio at all. Zero milliseconds with
+// hadQueued set means the whole turn was flushed unheard (it was queued behind
+// an earlier turn's tail); zero with it clear means there was nothing to hear.
 //
 // endsTheTurn says the flush is for the turn in progress. A stale interruption
 // (see openTurns) is about an older turn whose audio was flushed when it was
 // cancelled; it leaves the current turn's isResponding alone, because a turn
 // that is still being generated is not over. The event carries no turn
 // identity, so staleness is worked out from the order turns start and end.
-func (s *Session) stopPlayback(endsTheTurn bool) int {
+func (s *Session) stopPlayback(endsTheTurn bool) (playedMs int, hadQueued bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -665,6 +674,7 @@ func (s *Session) stopPlayback(endsTheTurn bool) int {
 	// What was queued, less what never made it out of the queue. Anything
 	// already handed to the wire counts as heard.
 	played := max(s.framesQueued-cleared, 0)
+	hadQueued = s.framesQueued > 0
 	s.framesQueued = 0
 	s.isBotSpeaking = false
 	if endsTheTurn {
@@ -675,7 +685,7 @@ func (s *Session) stopPlayback(endsTheTurn bool) int {
 	s.drainGeneration++
 	s.idleGeneration++
 
-	return played * frameDurationMs
+	return played * frameDurationMs, hadQueued
 }
 
 // endInterruptedTurn accounts for an interruption event and reports whether it

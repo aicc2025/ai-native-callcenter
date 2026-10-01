@@ -67,7 +67,9 @@ type Realtime struct {
 	cfg          SessionConfig
 	instructions string
 	// responseItemID identifies the assistant's current audio item, which is
-	// what truncation refers to.
+	// what truncation refers to. It belongs to one response: it is cleared when
+	// the next response is created and once the item has been truncated, so a
+	// trim never lands on an item the caller heard in full earlier.
 	responseItemID string
 	// isSessionRetried guards the one-shot retry of a rejected configuration.
 	isSessionRetried bool
@@ -674,7 +676,17 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 	// Telling the provider how much was heard keeps its conversation history
 	// honest: without it the model believes the caller heard a sentence that
 	// was cut off after three words.
-	if itemID != "" && playedMs > 0 {
+	//
+	// Zero is a report like any other: the turn's audio was queued behind an
+	// earlier turn's tail and flushed before a frame reached the caller, so the
+	// whole item comes out of the history. The id is spent once truncated, so a
+	// second report for the same turn cannot overwrite the first.
+	if itemID != "" && playedMs >= 0 {
+		r.mu.Lock()
+		if r.responseItemID == itemID {
+			r.responseItemID = ""
+		}
+		r.mu.Unlock()
 		if err := r.sendEvent(map[string]any{
 			"type":          "conversation.item.truncate",
 			"item_id":       itemID,
@@ -901,6 +913,9 @@ func (r *Realtime) handle(event *wireEvent) {
 		r.emit(Event{Type: EventTypeSpeechStopped})
 
 	case "response.created":
+		r.mu.Lock()
+		r.responseItemID = ""
+		r.mu.Unlock()
 		r.isResponseOpen.Store(true)
 		r.onResponseCreated()
 		r.signal(watchResponseStarted)
