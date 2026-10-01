@@ -41,7 +41,15 @@ const (
 // generate, so the cap has to cover generation plus playback plus drain on the
 // slower provider. Five seconds proved too tight on real calls: the line was
 // still playing when the cap cut it off.
+//
+// Once the closing line has finished generating, the cap is moved out to
+// cover the audio still queued ahead of and within it, plus lineDrainMargin;
+// it never moves earlier.
 const actionGraceCap = 10 * time.Second
+
+// lineDrainMargin is the slack over the queued audio's own length that a
+// generated closing line gets to finish playing.
+const lineDrainMargin = 2 * time.Second
 
 // Catalog is what the orchestrator needs to know about numbers and queues.
 type Catalog interface {
