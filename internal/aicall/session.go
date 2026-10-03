@@ -120,6 +120,12 @@ const (
 	// defaultBargeGuard matches what the reference implementation settled on
 	// after live calls.
 	defaultBargeGuard = 800 * time.Millisecond
+
+	// audibleGapSlack is how far past the end of the queued audio a new frame
+	// may arrive and still continue it. Two frames covers the jitter of a model
+	// streaming at real time; more silence than that is a gap the caller hears.
+	audibleGapSlack = 2 * frameDurationMs * time.Millisecond
+
 	// defaultNoInput is long enough not to talk over a caller who is thinking.
 	defaultNoInput = 8 * time.Second
 )
@@ -166,9 +172,17 @@ type Session struct {
 	// turnOwedUntil is when an asked-for turn that has not started yet stops
 	// counting as the bot's floor; zero is none. See askedForATurn.
 	turnOwedUntil time.Time
-	// speakingSince is when the current turn's first audio was queued, which is
-	// what the barge-in guard window is measured from.
-	speakingSince time.Time
+	// audibleSince is when the caller started hearing the bot after the last
+	// silence, which is what the barge-in guard window is measured from. It is
+	// set by queueFrame when audio is queued on an idle leg, cleared when
+	// playback is stopped, and not touched by a turn that follows another with
+	// the queue still full: the caller has heard the bot continuously since the
+	// first of them, and the line echo the guard exists for is long over.
+	// audibleUntil is when the audio queued so far finishes playing, which is
+	// how queueFrame tells a queue that drained from one that is being fed in
+	// real time. Both are zero while nothing is audible.
+	audibleSince time.Time
+	audibleUntil time.Time
 	// timer measures caller-stopped to reply-on-the-wire, per turn.
 	timer turnTimer
 
@@ -433,7 +447,6 @@ func (s *Session) playAudio(audio []byte) {
 
 	if !s.isBotSpeaking {
 		s.isBotSpeaking = true
-		s.speakingSince = time.Now()
 	}
 	s.timer.onFirstAudio()
 	s.playBuffer = s.downlink.Convert(s.playBuffer, audio)
@@ -446,10 +459,31 @@ func (s *Session) playAudio(audio []byte) {
 // A frame the leg refuses means the model is producing faster than real time
 // by more than the queue can hold — several seconds of audio. That is a
 // runaway response, and dropping the overflow beats growing without bound.
+//
+// This is also where the caller starts hearing the bot. The barge-in guard is
+// measured from the first frame queued on an idle leg, not from each turn's
+// first chunk: a turn queued behind another's tail is not the start of
+// anything the caller notices, and a turn whose audio sits in the queue has
+// not started to be heard until it reaches the front. A frame on an empty
+// queue is a new start only if the audio queued before it has finished
+// playing, because a model streaming in real time finds the queue empty before
+// almost every frame without the caller ever hearing silence. The clock is read
+// only on an empty queue, which keeps the hot path free of it.
 func (s *Session) queueFrame(frame []byte) {
+	isIdle := s.leg.Pending() == 0
 	if !s.leg.Send(frame) {
 		s.log.Warn("dropped model audio: the send queue is full")
 		return
+	}
+	if isIdle {
+		now := time.Now()
+		if s.audibleSince.IsZero() || now.After(s.audibleUntil.Add(audibleGapSlack)) {
+			s.audibleSince = now
+			s.audibleUntil = now
+		}
+	}
+	if !s.audibleSince.IsZero() {
+		s.audibleUntil = s.audibleUntil.Add(frameDurationMs * time.Millisecond)
 	}
 	s.framesQueued++
 	if totalMs, providerMs, ok := s.timer.onFirstFrame(); ok {
@@ -596,7 +630,7 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	s.mu.Lock()
 	isSpeaking := s.isBotSpeaking
 	isGenerating := s.isResponding
-	speakingFor := time.Since(s.speakingSince)
+	audibleFor := time.Since(s.audibleSince)
 	// Generation ending is not the caller's experience ending: the tail of
 	// the utterance is still queued and playing after the model has finished
 	// producing it. Speech over that tail is as much an interruption as
@@ -622,9 +656,12 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	// often the bot's own voice returning down the line, and acting on it makes
 	// the bot interrupt itself mid-sentence.
 	if reason == provider.InterruptReasonSpeech {
-		if guard := s.bargeGuard(); guard > 0 && speakingFor < guard {
-			s.log.Debug("ignored speech detected inside the barge-in guard",
-				"speakingForMs", speakingFor.Milliseconds(),
+		if guard := s.bargeGuard(); guard > 0 && audibleFor < guard {
+			// Info, not Debug: a swallowed interruption is invisible from the
+			// outside, and the call log has to be able to tell it from speech
+			// that was never detected.
+			s.log.Info("ignored speech detected inside the barge-in guard",
+				"speakingForMs", audibleFor.Milliseconds(),
 				"guardMs", guard.Milliseconds())
 			return
 		}
@@ -694,6 +731,8 @@ func (s *Session) stopPlayback(endsTheTurn bool) (playedMs int, hadQueued bool) 
 	hadQueued = s.framesQueued > 0
 	s.framesQueued = 0
 	s.isBotSpeaking = false
+	s.audibleSince = time.Time{}
+	s.audibleUntil = time.Time{}
 	if endsTheTurn {
 		s.isResponding = false
 	}

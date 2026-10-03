@@ -725,6 +725,71 @@ func TestSpeechDetectedAfterTheGuardInterrupts(t *testing.T) {
 	}
 }
 
+// speakForAWhile plays one chunk of model speech and waits for the session to
+// have queued all of it.
+func speakForAWhile(t *testing.T, leg *fakeLeg, model *fakeModel, frames int) {
+	t.Helper()
+	before := len(leg.sentFrames())
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{
+		Type:  provider.EventTypeAudioDelta,
+		Audio: make([]byte, media.FrameSamples*2*frames),
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(leg.sentFrames()) < before+frames && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(leg.sentFrames()); got < before+frames {
+		t.Fatalf("only %d of %d frames were queued", got-before, frames)
+	}
+}
+
+// The guard covers the caller starting to hear the bot, not each turn's first
+// chunk. A second turn queued behind the first, with the queue never empty
+// between them, is the same stretch of speech: the caller has heard the bot
+// for well over the guard when the second one starts, so speech over it is a
+// real interruption.
+func TestTheGuardIsNotRestartedByATurnQueuedBehindAnother(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: 300 * time.Millisecond, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+
+	speakForAWhile(t, leg, model, 4)
+	// Everything from here on is queued behind audio still playing.
+	leg.holdFrames(100)
+	time.Sleep(400 * time.Millisecond)
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
+	speakForAWhile(t, leg, model, 4)
+
+	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+	if got := model.recordedInterrupts(); len(got) != 1 {
+		t.Errorf("recorded %d interrupts, want 1", len(got))
+	}
+}
+
+// Once the queue has drained the caller hears silence, and the next audio is a
+// new start: speech inside the guard of it is still taken for echo, however
+// long ago the previous turn began.
+func TestTheGuardRestartsWhenTheBotBecomesAudibleAfterSilence(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: 300 * time.Millisecond, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+
+	speakForAWhile(t, leg, model, 4)
+	// The fake leg drains instantly, so the queue is empty; wait past the
+	// guard, and past the audio's own length, so the next turn is a new start.
+	time.Sleep(400 * time.Millisecond)
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
+	speakForAWhile(t, leg, model, 4)
+
+	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	time.Sleep(100 * time.Millisecond)
+	if got := model.recordedInterrupts(); len(got) != 0 {
+		t.Errorf("the bot interrupted itself inside the guard of new audio: %+v", got)
+	}
+}
+
 // A keypress cannot be an echo of anything, so the guard does not apply to it.
 func TestAKeypressInterruptsEvenInsideTheGuard(t *testing.T) {
 	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
