@@ -649,7 +649,10 @@ func (r *Realtime) UpdateInstructions(text string) error {
 //
 // Which side is responsible differs by vendor: one cancels on its own as soon
 // as it hears speech and only needs to be told how much was actually heard;
-// the other does nothing until asked.
+// the other does nothing until asked. That self-cancel is a reaction to the
+// provider hearing the caller, so it covers speech and nothing else: a
+// keypress or an application decision is something the provider never heard,
+// and every profile has to be asked to cancel for it.
 //
 // The two halves answer different questions and are gated separately. A
 // response is cancelled only while one is open — asking a provider to cancel
@@ -667,7 +670,8 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 	itemID := r.responseItemID
 	r.mu.Unlock()
 
-	if !r.profile.CancelsResponseItself && r.isResponseOpen.Load() {
+	isHeardByProvider := reason == InterruptReasonSpeech && r.profile.CancelsResponseItself
+	if !isHeardByProvider && r.isResponseOpen.Load() {
 		if err := r.sendCancel(); err != nil {
 			return err
 		}
@@ -731,7 +735,8 @@ const cancelAnswerWindow = 5 * time.Second
 // new response is requested before the refusal arrives, which is exactly what
 // a keypress or a spoken line does right after an interruption.
 func (r *Realtime) isAnsweredCancel(err *wireError) bool {
-	if err.Code != "invalid_value" ||
+	// qwen answers "invalid_value"; OpenAI names the code after the cancel.
+	if (err.Code != "invalid_value" && err.Code != "response_cancel_not_active") ||
 		!strings.Contains(strings.ToLower(err.Message), "no active response") {
 		return false
 	}

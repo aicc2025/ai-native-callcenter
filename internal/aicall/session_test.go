@@ -131,7 +131,8 @@ type fakeModel struct {
 	// what was already true at the moment a tool was answered.
 	onToolResult func()
 	// calls names the conversation-control methods in the order they were
-	// called: SendToolResult, UpdateInstructions, SpeakText.
+	// called: SendToolResult, UpdateInstructions, SpeakText, SendUserText,
+	// Interrupt.
 	calls []string
 }
 
@@ -168,6 +169,7 @@ func (m *fakeModel) SendUserText(text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.userText = append(m.userText, text)
+	m.calls = append(m.calls, "SendUserText")
 	return nil
 }
 
@@ -220,6 +222,7 @@ func (m *fakeModel) Interrupt(reason provider.InterruptReason, playedMs int) err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.interrupts = append(m.interrupts, interrupt{reason, playedMs})
+	m.calls = append(m.calls, "Interrupt")
 	return nil
 }
 
@@ -744,6 +747,72 @@ func TestAKeypressInterruptsEvenInsideTheGuard(t *testing.T) {
 	interrupts := model.recordedInterrupts()
 	if len(interrupts) != 1 || interrupts[0].reason != provider.InterruptReasonDTMF {
 		t.Errorf("interrupts = %+v, want the keypress to have cut in", interrupts)
+	}
+}
+
+// A turn that is being made and has not spoken yet has nothing queued, but it
+// is still the bot's floor: left running it answers what came before the key,
+// and the cue's own request for a reply collides with it. The keypress cancels
+// it first.
+func TestAKeypressTakesTheFloorFromATurnThatHasNotSpokenYet(t *testing.T) {
+	session, _, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: 10 * time.Second, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	startATurnWithNoAudio(t, session, model)
+
+	model.mu.Lock()
+	model.calls = nil // only what the keypress causes
+	model.mu.Unlock()
+	session.leg.(*fakeLeg).digits <- "0"
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(model.recordedUserText()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	model.mu.Lock()
+	calls := append([]string(nil), model.calls...)
+	model.mu.Unlock()
+	if len(calls) != 2 || calls[0] != "Interrupt" || calls[1] != "SendUserText" {
+		t.Fatalf("calls = %v, want the cancel before the cue", calls)
+	}
+	interrupts := model.recordedInterrupts()
+	if interrupts[0].reason != provider.InterruptReasonDTMF {
+		t.Errorf("reason = %q, want the keypress", interrupts[0].reason)
+	}
+	// Nothing was ever queued, so there is nothing to trim from the history.
+	if interrupts[0].playedMs >= 0 {
+		t.Errorf("playedMs = %d, want a negative (unknown) value so nothing is truncated",
+			interrupts[0].playedMs)
+	}
+}
+
+// Detected speech over a turn that has not spoken is the provider's to handle:
+// it cancels its own response, and there is no audio here to echo or to flush.
+func TestSpeechOverATurnThatHasNotSpokenYetDoesNothing(t *testing.T) {
+	session, _, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: -1, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	startATurnWithNoAudio(t, session, model)
+
+	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	time.Sleep(100 * time.Millisecond)
+	if got := model.recordedInterrupts(); len(got) != 0 {
+		t.Errorf("interrupts = %+v, want none", got)
+	}
+}
+
+// startATurnWithNoAudio opens a model turn that has produced nothing yet and
+// waits until the session has seen it.
+func startATurnWithNoAudio(t *testing.T, session *Session, model *fakeModel) {
+	t.Helper()
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	deadline := time.Now().Add(2 * time.Second)
+	for !session.isHoldingTheFloor() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !session.isHoldingTheFloor() {
+		t.Fatal("the session never saw the turn start")
 	}
 }
 

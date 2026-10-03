@@ -1005,6 +1005,41 @@ func TestInterruptOnAProviderThatMustBeTold(t *testing.T) {
 	f.awaitMessage("response.cancel")
 }
 
+// A provider that cancels on its own does so when it hears the caller. A
+// keypress or an application decision is something it never heard, so the
+// cancel has to be sent for those, and only for those.
+func TestAProviderThatCancelsOnSpeechIsStillToldToCancelForAKeypress(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		reason       InterruptReason
+		isCancelSent bool
+	}{
+		{"keypress", InterruptReasonDTMF, true},
+		{"application", InterruptReasonSystem, true},
+		{"speech", InterruptReasonSpeech, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeProvider(t, acceptSession)
+			session := testSession(t, f, OpenAIProfile())
+			if err := session.Start(t.Context(), basicConfig()); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			awaitEvent(t, session, EventTypeSessionReady)
+			f.send(map[string]any{"type": "response.created"})
+			awaitEvent(t, session, EventTypeResponseStarted)
+
+			if err := session.Interrupt(tt.reason, -1); err != nil {
+				t.Fatalf("interrupt: %v", err)
+			}
+			want := 0
+			if tt.isCancelSent {
+				want = 1
+			}
+			f.awaitMessages("response.cancel", want)
+		})
+	}
+}
+
 // The provider's response can end in the round trip between Interrupt reading
 // it as open and the cancel arriving, and qwen then refuses the cancel. That
 // race cannot be closed from this side; the refusal is the benign answer to our

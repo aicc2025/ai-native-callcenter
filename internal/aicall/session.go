@@ -595,6 +595,7 @@ func (s *Session) handleModelEvent(event provider.Event) {
 func (s *Session) bargeIn(reason provider.InterruptReason) {
 	s.mu.Lock()
 	isSpeaking := s.isBotSpeaking
+	isGenerating := s.isResponding
 	speakingFor := time.Since(s.speakingSince)
 	// Generation ending is not the caller's experience ending: the tail of
 	// the utterance is still queued and playing after the model has finished
@@ -604,7 +605,15 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	isAudioInFlight := s.framesQueued > 0 && s.leg.Pending() > 0
 	s.mu.Unlock()
 
-	if !isSpeaking && !isAudioInFlight {
+	// A keypress also takes the floor from a turn that is still being made and
+	// has not spoken yet: one that is only calling a tool, or one waiting on a
+	// tool result's answer. Left running, that turn answers what came before
+	// the key, and the keypress's own request for a reply is refused as a
+	// second response. Speech keeps the narrower gate: the provider's server
+	// detection already cancels a turn that has not spoken, and acting on a
+	// detection with nothing audible to echo would only duplicate it.
+	isKeyOverGeneration := reason == provider.InterruptReasonDTMF && isGenerating
+	if !isSpeaking && !isAudioInFlight && !isKeyOverGeneration {
 		return
 	}
 
@@ -621,7 +630,15 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 		}
 	}
 
-	playedMs, _ := s.stopPlayback(true)
+	playedMs, hadQueued := s.stopPlayback(true)
+	if !hadQueued {
+		// Nothing of this turn ever reached the leg, so there is no audio the
+		// caller could have heard and nothing in the model's history to trim.
+		// Negative is "not known": the provider cancels the response and
+		// truncates nothing, rather than aiming a truncate at an item with no
+		// audio in it.
+		playedMs = -1
+	}
 	// The provider is told whenever the caller stopped hearing something, not
 	// only while it was still producing. Its history is a record of what was
 	// said to the caller, and an utterance the caller never heard has to come
@@ -640,7 +657,7 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	// interruptions that happened left no trace at all and the ones that did
 	// not left one.
 	s.log.Info("the caller took the floor back",
-		"reason", string(reason), "playedMs", playedMs, "wasGenerating", isSpeaking)
+		"reason", string(reason), "playedMs", playedMs, "wasGenerating", isGenerating)
 	obs.RecordBotInterruption(string(reason))
 	s.emit(Event{Type: EventTypeBargeIn, Text: string(reason)})
 }
