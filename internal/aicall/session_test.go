@@ -1541,3 +1541,69 @@ func TestAKeypressAfterTheEndingIsArmedIsStillReported(t *testing.T) {
 		t.Errorf("user text = %v, want none", got)
 	}
 }
+
+//
+// Audio of a response that was cut off.
+//
+
+// The provider goes on streaming a cancelled response for a moment, and those
+// chunks arrive after the flush. Queued, they played as the tail of the answer
+// the caller had just interrupted (a live call heard 40-80 ms of it each time).
+func TestAudioOfAResponseThatWasCutOffIsNotPlayed(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: 10 * time.Second, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	speakForAWhile(t, leg, model, 4)
+
+	leg.digits <- "0"
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+	before := len(leg.sentFrames())
+
+	// The cancelled response's deltas still in flight.
+	model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*3),
+	}
+	model.events <- provider.Event{Type: provider.EventTypeInterrupted,
+		Status: "cancelled", InterruptedBy: provider.InterruptReasonDTMF}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+	model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*3),
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := len(leg.sentFrames()); got != before {
+		t.Fatalf("%d frames of a cut-off response reached the caller", got-before)
+	}
+
+	// The next turn is a new response and is heard.
+	speakForAWhile(t, leg, model, 4)
+}
+
+// Speech over the tail of a turn that has finished generating leaves nothing
+// to cut off: no response is open, so nothing more is coming, and the fence
+// must not wait on a turn to clear it.
+func TestABargeInOverAFinishedTurnsTailDoesNotFenceTheNextTurn(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: -1, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	speakForAWhile(t, leg, model, 4)
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+	leg.holdFrames(20)
+
+	leg.digits <- "0"
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+	leg.holdFrames(0)
+
+	// Audio straight after, even before a ResponseStarted, is not dropped.
+	before := len(leg.sentFrames())
+	model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*2),
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(leg.sentFrames()) < before+2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(leg.sentFrames()); got < before+2 {
+		t.Fatalf("only %d of 2 frames reached the caller", got-before)
+	}
+}

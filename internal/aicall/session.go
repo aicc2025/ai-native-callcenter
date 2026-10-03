@@ -176,6 +176,16 @@ type Session struct {
 	// that arrives while another turn is open belongs to the older one: it is
 	// stale, and must not take the floor from the turn that replaced it.
 	openTurns int
+	// isCutOff is true from a barge-in that flushed a response still being
+	// generated until the next turn starts: the provider goes on streaming the
+	// cancelled response for a moment (up to half a second on some engines),
+	// and what arrives in that stretch belongs to a turn the caller has
+	// already stopped hearing. Queued, it plays right after the flush as the
+	// tail of the answer they interrupted. Every turn begins with
+	// ResponseStarted, so that is where it clears. cutOffChunks counts what
+	// was dropped, for the log.
+	isCutOff     bool
+	cutOffChunks int
 	// turnOwedUntil is when an asked-for turn that has not started yet stops
 	// counting as the bot's floor; zero is none. See askedForATurn.
 	turnOwedUntil time.Time
@@ -452,6 +462,10 @@ func (s *Session) playAudio(audio []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.isCutOff {
+		s.cutOffChunks++
+		return
+	}
 	if !s.isBotSpeaking {
 		s.isBotSpeaking = true
 	}
@@ -675,6 +689,16 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	}
 
 	playedMs, hadQueued := s.stopPlayback(true)
+	if isGenerating {
+		// A response is still open on the provider's side and will go on
+		// sending audio until the cancel takes effect. With none open (speech
+		// over a finished turn's tail) nothing more is coming, and fencing
+		// would only wait for a turn that has nothing to clear it but the next
+		// legitimate one.
+		s.mu.Lock()
+		s.isCutOff = true
+		s.mu.Unlock()
+	}
 	if !hadQueued {
 		// Nothing of this turn ever reached the leg, so there is no audio the
 		// caller could have heard and nothing in the model's history to trim.
@@ -767,6 +791,13 @@ func (s *Session) beginTurn() {
 	s.isResponding = true
 	s.turnOwedUntil = time.Time{}
 	s.openTurns = min(s.openTurns+1, 2)
+	if s.isCutOff {
+		if s.cutOffChunks > 0 {
+			s.log.Debug("dropped the audio of a response that was cut off",
+				"chunks", s.cutOffChunks)
+		}
+		s.isCutOff, s.cutOffChunks = false, 0
+	}
 	// Any pending drain or dead-air watch belongs to the previous turn.
 	s.drainGeneration++
 	s.idleGeneration++

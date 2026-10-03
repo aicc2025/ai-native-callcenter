@@ -126,6 +126,10 @@ type Realtime struct {
 	// response. It is what lets a refusal of that cancel be recognised as
 	// the answer to our own request; see isAnsweredCancel.
 	cancelSentAt time.Time
+	// cancelReason is why that cancel was sent, so the provider's confirmation
+	// of it (a response that ends cancelled) names the decision that caused it
+	// rather than the default, speech. Spent when a response ends.
+	cancelReason InterruptReason
 
 	// dog ends a turn the provider has walked away from, and watch is the
 	// channel its progress signals travel on.
@@ -401,7 +405,7 @@ func (r *Realtime) SpeakText(text string, isClosing bool) error {
 	r.mu.Unlock()
 
 	if isCancelNeeded {
-		if err := r.sendCancel(); err != nil {
+		if err := r.sendCancel(InterruptReasonSystem); err != nil {
 			return err
 		}
 	}
@@ -531,7 +535,7 @@ func (r *Realtime) onResponseCreated() {
 		r.log.Debug("a new response answers the tool result that was waiting for the floor")
 	}
 	if isCancelNeeded {
-		if err := r.sendCancel(); err != nil {
+		if err := r.sendCancel(InterruptReasonSystem); err != nil {
 			r.log.Warn("could not stop the turn a spoken line replaces", "error", err)
 		}
 	}
@@ -725,7 +729,7 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 
 	isHeardByProvider := reason == InterruptReasonSpeech && r.profile.CancelsResponseItself
 	if !isHeardByProvider && r.isResponseOpen.Load() {
-		if err := r.sendCancel(); err != nil {
+		if err := r.sendCancel(reason); err != nil {
 			return err
 		}
 	}
@@ -763,9 +767,10 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 // provider may finish it in the round trip before the cancel arrives, and then
 // it refuses the cancel. No local state closes that window, so the refusal is
 // expected and has to be recognisable as ours — see isAnsweredCancel.
-func (r *Realtime) sendCancel() error {
+func (r *Realtime) sendCancel(reason InterruptReason) error {
 	r.mu.Lock()
 	r.cancelSentAt = time.Now()
+	r.cancelReason = reason
 	r.mu.Unlock()
 	return r.sendEvent(map[string]any{"type": "response.cancel"})
 }
@@ -1051,6 +1056,7 @@ func (r *Realtime) handle(event *wireEvent) {
 
 func (r *Realtime) handleResponseDone(event *wireEvent) {
 	r.isResponseOpen.Store(false)
+	cancelledFor := r.takeCancelReason()
 	r.signal(watchResponseEnded)
 	// Before anything asks for a turn, so that turn is made from a
 	// conversation without the calls this one left unfinished.
@@ -1088,6 +1094,9 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 	// record of the call.
 	if out.Status == statusCancelled {
 		by := InterruptReasonSpeech
+		if cancelledFor != "" {
+			by = cancelledFor
+		}
 		if isPreemptedForSpeak {
 			by = InterruptReasonSystem
 		}
@@ -1098,6 +1107,21 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 		return
 	}
 	r.emit(out)
+}
+
+// takeCancelReason returns why this client last cancelled, if it did so within
+// cancelAnswerWindow, and forgets it: one cancel explains one response's end.
+// A response that ended on its own after a cancel lost the race spends the
+// reason too, so it cannot label a later cancel the provider decides itself.
+func (r *Realtime) takeCancelReason() InterruptReason {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reason := r.cancelReason
+	r.cancelReason = ""
+	if time.Since(r.cancelSentAt) > cancelAnswerWindow {
+		return ""
+	}
+	return reason
 }
 
 // statusCancelled is what both providers call a response that was cut short.

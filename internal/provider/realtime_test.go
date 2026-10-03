@@ -2015,3 +2015,40 @@ func TestARefusedDeleteIsNotAnError(t *testing.T) {
 		}
 	}
 }
+
+// The confirmation of a cancel this client sent says why it was sent. A
+// keypress's cancel was labelled SPEECH, which put a caller who never spoke
+// into the log of the call.
+func TestAConfirmedCancelNamesTheReasonItWasSentFor(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	if err := session.Interrupt(InterruptReasonDTMF, -1); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	f.awaitMessages("response.cancel", 1)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "cancelled"}})
+
+	event := awaitEvent(t, session, EventTypeInterrupted)
+	if event.InterruptedBy != InterruptReasonDTMF {
+		t.Errorf("interruptedBy = %q, want the keypress", event.InterruptedBy)
+	}
+
+	// Spent on the response it belonged to: the next cancel is the provider's
+	// own, and is the caller's speech again.
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "cancelled"}})
+	event = awaitEvent(t, session, EventTypeInterrupted)
+	if event.InterruptedBy != InterruptReasonSpeech {
+		t.Errorf("interruptedBy = %q, want the caller", event.InterruptedBy)
+	}
+}
