@@ -680,10 +680,10 @@ continuing normally.
 `internal/provider/realtime.go` only; `VoiceSession` is unchanged.
 `SendToolResult` sends the `function_call_output` item at once and then, if a
 response is open (`isResponseOpen`) or a tool turn is already owed, records the
-turn as owed (`isToolTurnOwed`) instead of sending `response.create`; the
+turn as owed (`isTurnOwed`) instead of sending `response.create`; the
 decision is taken after the item is sent, so a released request can never
 precede the output it answers. `handleResponseDone` (and the watchdog's
-`onResponseStalled`) calls `releaseToolTurn` after `dispatchPendingSpeak`, which
+`onResponseStalled`) calls `releaseOwedTurn` after `dispatchPendingSpeak`, which
 asks for the owed turn. Several results in one response owe one turn. Any
 request the client makes discharges the owed turn (`requestResponse`), and so
 does any `response.created`, whoever asked for it, because every later response

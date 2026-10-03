@@ -1414,6 +1414,98 @@ func TestAResponseTheProviderStartsBeforeTheDoneDischargesTheOwedTurn(t *testing
 	f.awaitMessages("response.create", 1)
 }
 
+// A cue sent while a response is open is in the conversation at once, and the
+// reply to it is asked for when that response ends: a request in the meantime
+// is refused ("Cannot create response while another response is in progress")
+// and nothing retries it.
+func TestACueSentWhileAResponseIsOpenIsAnsweredWhenItEnds(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	finishTheOpeningTurn(t, f, session)
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+
+	if err := session.SendUserText("(The caller pressed 0 on their keypad.)"); err != nil {
+		t.Fatalf("send cue: %v", err)
+	}
+	f.awaitMessages("conversation.item.create", 1)
+	f.awaitMessages("response.create", 1) // the opening turn's own
+
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 2)
+}
+
+// The same in the window between asking for a turn and the provider creating
+// it. The response that request makes was asked for before the cue's item, so
+// its creation does not answer the cue: the reply is still owed when it ends.
+func TestACueSentBeforeTheRequestedResponseExistsIsAnsweredWhenItEnds(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	finishTheOpeningTurn(t, f, session)
+
+	if err := session.SendUserText("(The caller pressed 1 on their keypad.)"); err != nil {
+		t.Fatalf("send first cue: %v", err)
+	}
+	f.awaitMessages("response.create", 2)
+	// Asked for, not yet created: a second request would be refused.
+	if err := session.SendUserText("(The caller pressed 2 on their keypad.)"); err != nil {
+		t.Fatalf("send second cue: %v", err)
+	}
+	f.awaitMessages("response.create", 2)
+
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.awaitMessages("response.create", 2)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 3)
+}
+
+// A tool result owed during an open response is not discharged by a keypress's
+// cue: the cue's request used to go out, be refused, and take the owed turn
+// with it. Now both wait, and the one turn is asked for once.
+func TestACueDoesNotDischargeAnOwedToolTurn(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	openATurnThatCallsATool(t, f, session)
+
+	if err := session.SendToolResult("fc_1", `{"ok":true}`, ""); err != nil {
+		t.Fatalf("send tool result: %v", err)
+	}
+	if err := session.SendUserText("(The caller pressed 0 on their keypad.)"); err != nil {
+		t.Fatalf("send cue: %v", err)
+	}
+	f.awaitMessages("response.create", 1)
+
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 2)
+
+	// The released turn plays out; nothing more is owed.
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 2)
+}
+
 // A line asked for while a tool result's turn waits takes that turn: the line
 // is said with the result in view, and the floor is asked for once, for the
 // line.
