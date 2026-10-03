@@ -1518,3 +1518,26 @@ func TestTheSessionLogsTheCallIdOnce(t *testing.T) {
 		t.Errorf("the line does not carry the call's own id: %s", bridged)
 	}
 }
+
+// A keypress once the ending is armed is still reported to whoever records the
+// call, and logged; it just does nothing to the line or the model.
+func TestAKeypressAfterTheEndingIsArmedIsStillReported(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(), Config{
+		BargeGuard: -1, NoInput: -1, IsEndingArmed: func() bool { return true },
+	})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	speakForAWhile(t, leg, model, 4)
+	leg.holdFrames(50)
+
+	leg.digits <- "7"
+	if event := awaitBridgeEvent(t, session, EventTypeDigit); event.Text != "7" {
+		t.Errorf("digit = %q", event.Text)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := model.recordedInterrupts(); len(got) != 0 {
+		t.Errorf("interrupts = %+v, want none", got)
+	}
+	if got := model.recordedUserText(); len(got) != 0 {
+		t.Errorf("user text = %v, want none", got)
+	}
+}

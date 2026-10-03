@@ -320,8 +320,9 @@ func (o *Orchestrator) runCall(ctx context.Context, dialog *voice.Dialog) error 
 	}
 
 	session, err := New(FromDialog(dialog), model, profile, Config{
-		Session: sessionConfigFor(spec, runtime, language),
-		Logger:  log,
+		Session:       sessionConfigFor(spec, runtime, language),
+		IsEndingArmed: actions.isArmed,
+		Logger:        log,
 	})
 	if err != nil {
 		return err

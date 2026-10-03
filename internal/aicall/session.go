@@ -109,6 +109,13 @@ type Config struct {
 	// the check.
 	NoInput time.Duration
 
+	// IsEndingArmed reports whether the call's ending (a transfer or a hangup)
+	// is armed and waiting for its closing line to be heard. The orchestrator
+	// owns that truth (callActions); the session only asks, and never while
+	// holding mu, because arming reads the session's current turn under the
+	// actions' own lock. Nil is never armed.
+	IsEndingArmed func() bool
+
 	// Logger is the call's logger. The orchestrator has already bound the
 	// call's identity to it (callId, aiccCallId, did), so the session adds
 	// no key of its own: slog writes a key bound twice twice.
@@ -943,10 +950,17 @@ func (s *Session) isCurrentIdle(generation uint64) bool {
 
 // pumpDigits turns keypresses into conversation.
 //
-// A keypress always takes the floor immediately — someone pressing a key while
-// the bot talks has decided they are done listening — and the digit is put to
-// the model as something the caller did, because otherwise it has no way to
-// know it happened.
+// A keypress takes the floor immediately — someone pressing a key while the
+// bot talks has decided they are done listening — and the digit is put to the
+// model as something the caller did, because otherwise it has no way to know
+// it happened.
+//
+// Once the call's ending is armed the closing line is all that is left to say,
+// and a keypress cannot change what happens next. It is still recorded and
+// reported (the DIGIT event), but it neither cuts the line off nor asks the
+// model for a turn: every key interrupted the line and got its own reply, so a
+// caller pressing 0 five times heard the goodbye in five fragments and the
+// transfer waited for the last full one.
 func (s *Session) pumpDigits() {
 	defer s.wg.Done()
 
@@ -958,6 +972,11 @@ func (s *Session) pumpDigits() {
 		case digit, ok := <-digits:
 			if !ok {
 				return
+			}
+			if s.cfg.IsEndingArmed != nil && s.cfg.IsEndingArmed() {
+				s.log.Info("a keypress after the ending was armed is only recorded", "digit", digit)
+				s.emit(Event{Type: EventTypeDigit, Text: digit})
+				continue
 			}
 			s.bargeIn(provider.InterruptReasonDTMF)
 			s.emit(Event{Type: EventTypeDigit, Text: digit})
