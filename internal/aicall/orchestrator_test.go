@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1449,7 +1450,16 @@ func startToolPath(t *testing.T, profile provider.Profile, lang string) *toolPat
 
 func startToolPathWith(t *testing.T, profile provider.Profile, lang, flowJSON string) *toolPath {
 	t.Helper()
-	session, leg, model := startBridge(t, profile)
+	// The session asks the actions whether the ending is armed, as the
+	// orchestrator wires it; the actions exist only after the session does.
+	var actionsRef atomic.Pointer[callActions]
+	session, leg, model := startBridgeWith(t, profile, Config{
+		BargeGuard: -1, NoInput: -1,
+		IsEndingArmed: func() bool {
+			a := actionsRef.Load()
+			return a != nil && a.isArmed()
+		},
+	})
 	awaitBridgeEvent(t, session, EventTypeReady)
 
 	o := testOrchestrator(t, &fakeSwitch{})
@@ -1465,6 +1475,7 @@ func startToolPathWith(t *testing.T, profile provider.Profile, lang, flowJSON st
 	}
 	recorder := newCallRecorder(uuid.New(), time.Now(), nil)
 	actions.recorder = recorder
+	actionsRef.Store(actions)
 	runtime := flow.NewRuntime(engine, actions, flow.NewBackend(""), nil, log)
 
 	h := &toolPath{session: session, leg: leg, model: model, actions: actions,
@@ -1945,5 +1956,121 @@ func TestTheLastMoveOfOneResponseWins(t *testing.T) {
 				t.Errorf("spoken lines = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+//
+// Keypresses once the ending is armed.
+//
+
+// pressKey presses a key on the caller's phone and gives the digit pump the
+// moment it needs to act on it.
+func (h *toolPath) pressKey(t *testing.T, digit string) {
+	t.Helper()
+	h.leg.digits <- digit
+	deadline := time.Now().Add(2 * time.Second)
+	for len(h.leg.digits) > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+// What a call showed: the caller pressed 0, the transfer was armed, and five
+// more presses each cut the closing line off and got a turn of their own, so
+// the line was said in fragments, said again, and the transfer waited for the
+// last full one. Once the ending is armed a key is recorded and nothing else:
+// the line plays out, and the action runs when the caller has heard it.
+func TestAKeypressAfterTheEndingIsArmedLeavesTheClosingLineAlone(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+	h.actions.graceCap = 5 * time.Second
+	fired := make(chan struct{})
+
+	h.callTool(t, flow.ToolHangup, `{}`)
+	if !h.actions.isArmed() {
+		t.Fatal("the hangup did not arm the ending")
+	}
+	h.actions.mu.Lock()
+	armedAction := h.actions.armed
+	h.actions.armed = func() { armedAction(); close(fired) }
+	h.actions.mu.Unlock()
+	cues := len(h.model.recordedUserText())
+
+	// Before the closing line has spoken: the turn the tool result asked for
+	// is being made and has no audio yet.
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	time.Sleep(20 * time.Millisecond)
+	h.pressKey(t, "0")
+
+	// And while it plays.
+	h.model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*4),
+	}
+	h.leg.holdFrames(100)
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	time.Sleep(50 * time.Millisecond)
+	h.pressKey(t, "0")
+	h.pressKey(t, "0")
+
+	if got := h.model.recordedInterrupts(); len(got) != 0 {
+		t.Errorf("a keypress interrupted the closing line: %+v", got)
+	}
+	if got := h.model.recordedUserText(); len(got) != cues {
+		t.Errorf("a keypress asked the model for a turn: %v", got[cues:])
+	}
+	if h.leg.clears() != 0 {
+		t.Error("a keypress flushed the closing line")
+	}
+	select {
+	case <-fired:
+		t.Fatal("a keypress ran the armed action before the line was heard")
+	default:
+	}
+
+	h.leg.holdFrames(0)
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the armed action did not run once the closing line was heard")
+	}
+}
+
+// Speech is another matter: a caller who talks after the closing line has said
+// what they had to say, and the armed action runs now.
+func TestSpeechAfterTheClosingLineStillRunsTheArmedAction(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+	h.actions.graceCap = 5 * time.Second
+
+	h.callTool(t, flow.ToolHangup, `{}`)
+	h.leg.holdFrames(100)
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseDone, Status: "completed"}
+	h.playTurn()
+	time.Sleep(100 * time.Millisecond)
+	if h.isCallEnded() {
+		t.Fatal("the call ended before the caller spoke")
+	}
+
+	h.model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	h.awaitCallEnded(t, 2*time.Second)
+}
+
+// Before the ending is armed a keypress takes the floor and reaches the model,
+// as it always did.
+func TestAKeypressBeforeTheEndingIsArmedStillInterrupts(t *testing.T) {
+	h := startToolPath(t, provider.QwenProfile(), "en")
+
+	h.model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	h.model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*4),
+	}
+	h.leg.holdFrames(100)
+	time.Sleep(50 * time.Millisecond)
+	h.pressKey(t, "2")
+
+	got := h.model.recordedInterrupts()
+	if len(got) != 1 || got[0].reason != provider.InterruptReasonDTMF {
+		t.Errorf("interrupts = %+v, want the keypress to have cut in", got)
+	}
+	if len(h.model.recordedUserText()) != 1 {
+		t.Errorf("user text = %v, want the keypress cue", h.model.recordedUserText())
 	}
 }

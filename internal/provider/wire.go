@@ -37,14 +37,16 @@ type wireEvent struct {
 }
 
 type wireItem struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
 }
 
 type wireResponse struct {
 	ID     string     `json:"id"`
 	Status string     `json:"status"`
 	Usage  *wireUsage `json:"usage"`
+	Output []wireItem `json:"output"`
 }
 
 type wireUsage struct {

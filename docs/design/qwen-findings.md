@@ -680,10 +680,10 @@ continuing normally.
 `internal/provider/realtime.go` only; `VoiceSession` is unchanged.
 `SendToolResult` sends the `function_call_output` item at once and then, if a
 response is open (`isResponseOpen`) or a tool turn is already owed, records the
-turn as owed (`isToolTurnOwed`) instead of sending `response.create`; the
+turn as owed (`isTurnOwed`) instead of sending `response.create`; the
 decision is taken after the item is sent, so a released request can never
 precede the output it answers. `handleResponseDone` (and the watchdog's
-`onResponseStalled`) calls `releaseToolTurn` after `dispatchPendingSpeak`, which
+`onResponseStalled`) calls `releaseOwedTurn` after `dispatchPendingSpeak`, which
 asks for the owed turn. Several results in one response owe one turn. Any
 request the client makes discharges the owed turn (`requestResponse`), and so
 does any `response.created`, whoever asked for it, because every later response
@@ -784,3 +784,61 @@ the decision below — one function tool). **MEASURED:**
 **Not covered.** This probe placed no telephone call: barge-in over real
 speech, the drain and playback gating, a mid-call `announce` (W-Q1) and voice
 quality on the 8 kHz leg are not verified by it.
+
+## W-Q5: a cancelled response leaves its half-made function call in the conversation (2026-10-03)
+
+**W-Q5 — a response cancelled while it writes a function call's arguments leaves
+the call in the conversation, and the model then copies it instead of calling
+the tool.** Found 2026-10-03 with a standalone probe (a logging WebSocket proxy
+in front of `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`, model
+`qwen-audio-3.1-realtime-plus`, the production session of the mobile-support
+flow for DID 95012, a keypad cue standing for the caller pressing 0).
+
+**The shape.** The first cue starts a response that adds a
+`transfer_to_agent` item (`response.output_item.added`, `function_call`,
+`arguments:""`). A second keypress cancels it (`response.cancel`, which a
+keypress always sends) before the arguments finish. qwen answers
+`response.done` with `status=cancelled` whose `output` still carries that
+function call, with the arguments as far as they got (`""` or `{"queue": `), and
+**never sends `response.function_call_arguments.done`**. The item stays in the
+conversation with no output. The next response, asked for by the second cue,
+often only *says* "正在为您转接人工客服" and never calls the tool, and keeps
+copying that on every later turn.
+
+**Counts.** With the cancel landing on a call in flight and the second cue sent
+straight after (the product's behaviour since a second keypress started
+cancelling the first keypress's response), the second response called the tool
+in 4 of 9 cases and only said it in 5 of 9. The same cue sequence with no
+dangling call (the first response completed, or never started a call): 0 of 10
+misses.
+
+**The gate.** The same sequence with a `conversation.item.delete` for the
+function call's item id sent when `response.done(cancelled)` arrived and before
+the second cue's `response.create`: 20 sessions, 10 of which had a dangling
+call. All 10 deletes were answered with `conversation.item.deleted` and no
+`error`; in all 10 the second response called `transfer_to_agent`. The other 10
+sessions' first response had completed before the cancel could land; a delete
+sent for those items (not something the product does) was acknowledged too. So
+qwen **does** honour `conversation.item.delete`, and the history without the
+call is one the model acts on.
+
+**The fix (`provider.Realtime`).** `output_item.added` of a `function_call` opens
+the call and `response.function_call_arguments.done` closes it (matched by item
+id or by call id, since a dialect may carry only one). When a response ends with
+any status other than `completed`, every call that is open, or is listed in the
+response's `output` and was never closed, is deleted with
+`conversation.item.delete`, before the `response.create` that the same
+`response.done` releases (`dispatchPendingSpeak`, `releaseOwedTurn`), so the next
+turn is made on the cleaned history. A call whose arguments completed was handed
+out as a tool call and gets its output; it is never deleted. The stall path
+(`onResponseStalled`) does not delete: the provider has not said that response is
+over and may still finish the call, and a deleted item that then receives its
+arguments and its output breaks a call the consumer is answering. A refused
+delete (an item already gone, a provider without the event) is logged at debug
+and not reported, recognised like a refused cancel by a time window after our own
+delete. All Realtime profiles send it, as they all send `conversation.item.truncate`;
+OpenAI documents the event. Covered by
+`TestACancelledResponseTakesItsUnfinishedCallOutBeforeTheOwedTurn`,
+`TestACancelledResponseKeepsACallThatFinished`,
+`TestACallFinishedByCallIDAloneIsKept`, `TestACompletedResponseDeletesNothing`
+and `TestARefusedDeleteIsNotAnError` in `internal/provider/realtime_test.go`.

@@ -1005,6 +1005,41 @@ func TestInterruptOnAProviderThatMustBeTold(t *testing.T) {
 	f.awaitMessage("response.cancel")
 }
 
+// A provider that cancels on its own does so when it hears the caller. A
+// keypress or an application decision is something it never heard, so the
+// cancel has to be sent for those, and only for those.
+func TestAProviderThatCancelsOnSpeechIsStillToldToCancelForAKeypress(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		reason       InterruptReason
+		isCancelSent bool
+	}{
+		{"keypress", InterruptReasonDTMF, true},
+		{"application", InterruptReasonSystem, true},
+		{"speech", InterruptReasonSpeech, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeProvider(t, acceptSession)
+			session := testSession(t, f, OpenAIProfile())
+			if err := session.Start(t.Context(), basicConfig()); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			awaitEvent(t, session, EventTypeSessionReady)
+			f.send(map[string]any{"type": "response.created"})
+			awaitEvent(t, session, EventTypeResponseStarted)
+
+			if err := session.Interrupt(tt.reason, -1); err != nil {
+				t.Fatalf("interrupt: %v", err)
+			}
+			want := 0
+			if tt.isCancelSent {
+				want = 1
+			}
+			f.awaitMessages("response.cancel", want)
+		})
+	}
+}
+
 // The provider's response can end in the round trip between Interrupt reading
 // it as open and the cancel arriving, and qwen then refuses the cancel. That
 // race cannot be closed from this side; the refusal is the benign answer to our
@@ -1379,6 +1414,98 @@ func TestAResponseTheProviderStartsBeforeTheDoneDischargesTheOwedTurn(t *testing
 	f.awaitMessages("response.create", 1)
 }
 
+// A cue sent while a response is open is in the conversation at once, and the
+// reply to it is asked for when that response ends: a request in the meantime
+// is refused ("Cannot create response while another response is in progress")
+// and nothing retries it.
+func TestACueSentWhileAResponseIsOpenIsAnsweredWhenItEnds(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	finishTheOpeningTurn(t, f, session)
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+
+	if err := session.SendUserText("(The caller pressed 0 on their keypad.)"); err != nil {
+		t.Fatalf("send cue: %v", err)
+	}
+	f.awaitMessages("conversation.item.create", 1)
+	f.awaitMessages("response.create", 1) // the opening turn's own
+
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 2)
+}
+
+// The same in the window between asking for a turn and the provider creating
+// it. The response that request makes was asked for before the cue's item, so
+// its creation does not answer the cue: the reply is still owed when it ends.
+func TestACueSentBeforeTheRequestedResponseExistsIsAnsweredWhenItEnds(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	finishTheOpeningTurn(t, f, session)
+
+	if err := session.SendUserText("(The caller pressed 1 on their keypad.)"); err != nil {
+		t.Fatalf("send first cue: %v", err)
+	}
+	f.awaitMessages("response.create", 2)
+	// Asked for, not yet created: a second request would be refused.
+	if err := session.SendUserText("(The caller pressed 2 on their keypad.)"); err != nil {
+		t.Fatalf("send second cue: %v", err)
+	}
+	f.awaitMessages("response.create", 2)
+
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.awaitMessages("response.create", 2)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 3)
+}
+
+// A tool result owed during an open response is not discharged by a keypress's
+// cue: the cue's request used to go out, be refused, and take the owed turn
+// with it. Now both wait, and the one turn is asked for once.
+func TestACueDoesNotDischargeAnOwedToolTurn(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	openATurnThatCallsATool(t, f, session)
+
+	if err := session.SendToolResult("fc_1", `{"ok":true}`, ""); err != nil {
+		t.Fatalf("send tool result: %v", err)
+	}
+	if err := session.SendUserText("(The caller pressed 0 on their keypad.)"); err != nil {
+		t.Fatalf("send cue: %v", err)
+	}
+	f.awaitMessages("response.create", 1)
+
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 2)
+
+	// The released turn plays out; nothing more is owed.
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "completed"}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("response.create", 2)
+}
+
 // A line asked for while a tool result's turn waits takes that turn: the line
 // is said with the result in view, and the floor is asked for once, for the
 // line.
@@ -1730,5 +1857,198 @@ func TestARealStallIsStillCaught(t *testing.T) {
 		case <-deadline:
 			t.Fatal("a genuinely stalled turn was never closed out")
 		}
+	}
+}
+
+// beginACallThatIsNeverFinished plays the greeting out and opens a turn in
+// which the model starts a function call: the item is added and some of its
+// arguments stream, and the arguments never complete.
+func beginACallThatIsNeverFinished(t *testing.T, f *fakeProvider, session *Realtime) {
+	t.Helper()
+	finishTheOpeningTurn(t, f, session)
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.output_item.added",
+		"item": map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}})
+	f.send(map[string]any{"type": "response.function_call_arguments.delta",
+		"item_id": "item_fc", "call_id": "call_fc", "delta": `{"queue": `})
+}
+
+// The live defect (qwen-findings W-Q5): a response cut off while it writes a
+// call's arguments leaves the call in the conversation, unanswered, and the
+// model then says it is transferring without calling the tool. The call comes
+// out of the conversation before the turn that was owed is asked for.
+func TestACancelledResponseTakesItsUnfinishedCallOutBeforeTheOwedTurn(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+
+	if err := session.SendUserText("(The caller pressed 0 on their keypad.)"); err != nil {
+		t.Fatalf("send cue: %v", err)
+	}
+	f.awaitMessages("response.create", 1)
+	f.awaitMessages("conversation.item.delete", 0)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "cancelled",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call",
+			"call_id": "call_fc", "arguments": `{"queue": `}},
+	}})
+	awaitEvent(t, session, EventTypeInterrupted)
+
+	deletes := f.awaitMessages("conversation.item.delete", 1)
+	if deletes[0]["item_id"] != "item_fc" {
+		t.Errorf("deleted %v, want item_fc", deletes[0]["item_id"])
+	}
+	f.awaitMessages("response.create", 2)
+	types := typesOf(f.messages())
+	if deleteAt, createAt := indexOf(types, "conversation.item.delete"), len(types)-1-indexOf(reversed(types), "response.create"); deleteAt > createAt {
+		t.Errorf("the owed turn was asked for before the call was taken out: %v", types)
+	}
+}
+
+// A call whose arguments completed was handed to the consumer, who answers it;
+// taking it back would leave its output pointing at nothing.
+func TestACancelledResponseKeepsACallThatFinished(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+	f.send(map[string]any{"type": "response.function_call_arguments.done",
+		"item_id": "item_fc", "call_id": "call_fc", "name": "transfer_to_agent", "arguments": `{}`})
+	awaitEvent(t, session, EventTypeToolCall)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "cancelled",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}},
+	}})
+	awaitEvent(t, session, EventTypeInterrupted)
+	f.awaitMessages("conversation.item.delete", 0)
+}
+
+// A call whose arguments completed under the call id alone (a dialect that
+// leaves the item id off the event) is just as finished.
+func TestACallFinishedByCallIDAloneIsKept(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+	f.send(map[string]any{"type": "response.function_call_arguments.done",
+		"call_id": "call_fc", "name": "transfer_to_agent", "arguments": `{}`})
+	awaitEvent(t, session, EventTypeToolCall)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "cancelled",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}},
+	}})
+	awaitEvent(t, session, EventTypeInterrupted)
+	f.awaitMessages("conversation.item.delete", 0)
+}
+
+// A response that ran to its end has nothing to take back.
+func TestACompletedResponseDeletesNothing(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "completed",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}},
+	}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("conversation.item.delete", 0)
+}
+
+// An item the provider no longer has, or a provider without the event, answers
+// the delete with an error. History is as clean as it can be made, so nothing
+// is reported; the same words long after a delete are still an error.
+func TestARefusedDeleteIsNotAnError(t *testing.T) {
+	f := newFakeProvider(t, func(f *fakeProvider, message map[string]any) {
+		acceptSession(f, message)
+		if message["type"] == "conversation.item.delete" {
+			f.send(map[string]any{"type": "error", "error": map[string]any{
+				"type": "invalid_request_error", "code": "item_not_found",
+				"message": "Item with id 'item_fc' not found"}})
+		}
+	})
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "cancelled",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}},
+	}})
+	f.awaitMessages("conversation.item.delete", 1)
+
+	// The refusal has reached the client once a later event is handled.
+	f.send(map[string]any{"type": "response.created"})
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-session.Events():
+			if event.Type == EventTypeError {
+				t.Fatalf("a refused delete surfaced as an error: %v", event.Err)
+			}
+			if event.Type == EventTypeResponseStarted {
+				return
+			}
+		case <-deadline:
+			t.Fatal("no response.created event arrived")
+		}
+	}
+}
+
+// The confirmation of a cancel this client sent says why it was sent. A
+// keypress's cancel was labelled SPEECH, which put a caller who never spoke
+// into the log of the call.
+func TestAConfirmedCancelNamesTheReasonItWasSentFor(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	if err := session.Interrupt(InterruptReasonDTMF, -1); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	f.awaitMessages("response.cancel", 1)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "cancelled"}})
+
+	event := awaitEvent(t, session, EventTypeInterrupted)
+	if event.InterruptedBy != InterruptReasonDTMF {
+		t.Errorf("interruptedBy = %q, want the keypress", event.InterruptedBy)
+	}
+
+	// Spent on the response it belonged to: the next cancel is the provider's
+	// own, and is the caller's speech again.
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.done",
+		"response": map[string]any{"status": "cancelled"}})
+	event = awaitEvent(t, session, EventTypeInterrupted)
+	if event.InterruptedBy != InterruptReasonSpeech {
+		t.Errorf("interruptedBy = %q, want the caller", event.InterruptedBy)
 	}
 }

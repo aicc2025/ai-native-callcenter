@@ -109,6 +109,13 @@ type Config struct {
 	// the check.
 	NoInput time.Duration
 
+	// IsEndingArmed reports whether the call's ending (a transfer or a hangup)
+	// is armed and waiting for its closing line to be heard. The orchestrator
+	// owns that truth (callActions); the session only asks, and never while
+	// holding mu, because arming reads the session's current turn under the
+	// actions' own lock. Nil is never armed.
+	IsEndingArmed func() bool
+
 	// Logger is the call's logger. The orchestrator has already bound the
 	// call's identity to it (callId, aiccCallId, did), so the session adds
 	// no key of its own: slog writes a key bound twice twice.
@@ -120,6 +127,12 @@ const (
 	// defaultBargeGuard matches what the reference implementation settled on
 	// after live calls.
 	defaultBargeGuard = 800 * time.Millisecond
+
+	// audibleGapSlack is how far past the end of the queued audio a new frame
+	// may arrive and still continue it. Two frames covers the jitter of a model
+	// streaming at real time; more silence than that is a gap the caller hears.
+	audibleGapSlack = 2 * frameDurationMs * time.Millisecond
+
 	// defaultNoInput is long enough not to talk over a caller who is thinking.
 	defaultNoInput = 8 * time.Second
 )
@@ -163,12 +176,30 @@ type Session struct {
 	// that arrives while another turn is open belongs to the older one: it is
 	// stale, and must not take the floor from the turn that replaced it.
 	openTurns int
+	// isCutOff is true from a barge-in that flushed a response still being
+	// generated until the next turn starts: the provider goes on streaming the
+	// cancelled response for a moment (up to half a second on some engines),
+	// and what arrives in that stretch belongs to a turn the caller has
+	// already stopped hearing. Queued, it plays right after the flush as the
+	// tail of the answer they interrupted. Every turn begins with
+	// ResponseStarted, so that is where it clears. cutOffChunks counts what
+	// was dropped, for the log.
+	isCutOff     bool
+	cutOffChunks int
 	// turnOwedUntil is when an asked-for turn that has not started yet stops
 	// counting as the bot's floor; zero is none. See askedForATurn.
 	turnOwedUntil time.Time
-	// speakingSince is when the current turn's first audio was queued, which is
-	// what the barge-in guard window is measured from.
-	speakingSince time.Time
+	// audibleSince is when the caller started hearing the bot after the last
+	// silence, which is what the barge-in guard window is measured from. It is
+	// set by queueFrame when audio is queued on an idle leg, cleared when
+	// playback is stopped, and not touched by a turn that follows another with
+	// the queue still full: the caller has heard the bot continuously since the
+	// first of them, and the line echo the guard exists for is long over.
+	// audibleUntil is when the audio queued so far finishes playing, which is
+	// how queueFrame tells a queue that drained from one that is being fed in
+	// real time. Both are zero while nothing is audible.
+	audibleSince time.Time
+	audibleUntil time.Time
 	// timer measures caller-stopped to reply-on-the-wire, per turn.
 	timer turnTimer
 
@@ -431,9 +462,12 @@ func (s *Session) playAudio(audio []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.isCutOff {
+		s.cutOffChunks++
+		return
+	}
 	if !s.isBotSpeaking {
 		s.isBotSpeaking = true
-		s.speakingSince = time.Now()
 	}
 	s.timer.onFirstAudio()
 	s.playBuffer = s.downlink.Convert(s.playBuffer, audio)
@@ -446,10 +480,31 @@ func (s *Session) playAudio(audio []byte) {
 // A frame the leg refuses means the model is producing faster than real time
 // by more than the queue can hold — several seconds of audio. That is a
 // runaway response, and dropping the overflow beats growing without bound.
+//
+// This is also where the caller starts hearing the bot. The barge-in guard is
+// measured from the first frame queued on an idle leg, not from each turn's
+// first chunk: a turn queued behind another's tail is not the start of
+// anything the caller notices, and a turn whose audio sits in the queue has
+// not started to be heard until it reaches the front. A frame on an empty
+// queue is a new start only if the audio queued before it has finished
+// playing, because a model streaming in real time finds the queue empty before
+// almost every frame without the caller ever hearing silence. The clock is read
+// only on an empty queue, which keeps the hot path free of it.
 func (s *Session) queueFrame(frame []byte) {
+	isIdle := s.leg.Pending() == 0
 	if !s.leg.Send(frame) {
 		s.log.Warn("dropped model audio: the send queue is full")
 		return
+	}
+	if isIdle {
+		now := time.Now()
+		if s.audibleSince.IsZero() || now.After(s.audibleUntil.Add(audibleGapSlack)) {
+			s.audibleSince = now
+			s.audibleUntil = now
+		}
+	}
+	if !s.audibleSince.IsZero() {
+		s.audibleUntil = s.audibleUntil.Add(frameDurationMs * time.Millisecond)
 	}
 	s.framesQueued++
 	if totalMs, providerMs, ok := s.timer.onFirstFrame(); ok {
@@ -595,7 +650,8 @@ func (s *Session) handleModelEvent(event provider.Event) {
 func (s *Session) bargeIn(reason provider.InterruptReason) {
 	s.mu.Lock()
 	isSpeaking := s.isBotSpeaking
-	speakingFor := time.Since(s.speakingSince)
+	isGenerating := s.isResponding
+	audibleFor := time.Since(s.audibleSince)
 	// Generation ending is not the caller's experience ending: the tail of
 	// the utterance is still queued and playing after the model has finished
 	// producing it. Speech over that tail is as much an interruption as
@@ -604,7 +660,15 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	isAudioInFlight := s.framesQueued > 0 && s.leg.Pending() > 0
 	s.mu.Unlock()
 
-	if !isSpeaking && !isAudioInFlight {
+	// A keypress also takes the floor from a turn that is still being made and
+	// has not spoken yet: one that is only calling a tool, or one waiting on a
+	// tool result's answer. Left running, that turn answers what came before
+	// the key, and the keypress's own request for a reply is refused as a
+	// second response. Speech keeps the narrower gate: the provider's server
+	// detection already cancels a turn that has not spoken, and acting on a
+	// detection with nothing audible to echo would only duplicate it.
+	isKeyOverGeneration := reason == provider.InterruptReasonDTMF && isGenerating
+	if !isSpeaking && !isAudioInFlight && !isKeyOverGeneration {
 		return
 	}
 
@@ -613,15 +677,36 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	// often the bot's own voice returning down the line, and acting on it makes
 	// the bot interrupt itself mid-sentence.
 	if reason == provider.InterruptReasonSpeech {
-		if guard := s.bargeGuard(); guard > 0 && speakingFor < guard {
-			s.log.Debug("ignored speech detected inside the barge-in guard",
-				"speakingForMs", speakingFor.Milliseconds(),
+		if guard := s.bargeGuard(); guard > 0 && audibleFor < guard {
+			// Info, not Debug: a swallowed interruption is invisible from the
+			// outside, and the call log has to be able to tell it from speech
+			// that was never detected.
+			s.log.Info("ignored speech detected inside the barge-in guard",
+				"speakingForMs", audibleFor.Milliseconds(),
 				"guardMs", guard.Milliseconds())
 			return
 		}
 	}
 
-	playedMs, _ := s.stopPlayback(true)
+	playedMs, hadQueued := s.stopPlayback(true)
+	if isGenerating {
+		// A response is still open on the provider's side and will go on
+		// sending audio until the cancel takes effect. With none open (speech
+		// over a finished turn's tail) nothing more is coming, and fencing
+		// would only wait for a turn that has nothing to clear it but the next
+		// legitimate one.
+		s.mu.Lock()
+		s.isCutOff = true
+		s.mu.Unlock()
+	}
+	if !hadQueued {
+		// Nothing of this turn ever reached the leg, so there is no audio the
+		// caller could have heard and nothing in the model's history to trim.
+		// Negative is "not known": the provider cancels the response and
+		// truncates nothing, rather than aiming a truncate at an item with no
+		// audio in it.
+		playedMs = -1
+	}
 	// The provider is told whenever the caller stopped hearing something, not
 	// only while it was still producing. Its history is a record of what was
 	// said to the caller, and an utterance the caller never heard has to come
@@ -640,7 +725,7 @@ func (s *Session) bargeIn(reason provider.InterruptReason) {
 	// interruptions that happened left no trace at all and the ones that did
 	// not left one.
 	s.log.Info("the caller took the floor back",
-		"reason", string(reason), "playedMs", playedMs, "wasGenerating", isSpeaking)
+		"reason", string(reason), "playedMs", playedMs, "wasGenerating", isGenerating)
 	obs.RecordBotInterruption(string(reason))
 	s.emit(Event{Type: EventTypeBargeIn, Text: string(reason)})
 }
@@ -677,6 +762,8 @@ func (s *Session) stopPlayback(endsTheTurn bool) (playedMs int, hadQueued bool) 
 	hadQueued = s.framesQueued > 0
 	s.framesQueued = 0
 	s.isBotSpeaking = false
+	s.audibleSince = time.Time{}
+	s.audibleUntil = time.Time{}
 	if endsTheTurn {
 		s.isResponding = false
 	}
@@ -704,6 +791,13 @@ func (s *Session) beginTurn() {
 	s.isResponding = true
 	s.turnOwedUntil = time.Time{}
 	s.openTurns = min(s.openTurns+1, 2)
+	if s.isCutOff {
+		if s.cutOffChunks > 0 {
+			s.log.Debug("dropped the audio of a response that was cut off",
+				"chunks", s.cutOffChunks)
+		}
+		s.isCutOff, s.cutOffChunks = false, 0
+	}
 	// Any pending drain or dead-air watch belongs to the previous turn.
 	s.drainGeneration++
 	s.idleGeneration++
@@ -887,10 +981,17 @@ func (s *Session) isCurrentIdle(generation uint64) bool {
 
 // pumpDigits turns keypresses into conversation.
 //
-// A keypress always takes the floor immediately — someone pressing a key while
-// the bot talks has decided they are done listening — and the digit is put to
-// the model as something the caller did, because otherwise it has no way to
-// know it happened.
+// A keypress takes the floor immediately — someone pressing a key while the
+// bot talks has decided they are done listening — and the digit is put to the
+// model as something the caller did, because otherwise it has no way to know
+// it happened.
+//
+// Once the call's ending is armed the closing line is all that is left to say,
+// and a keypress cannot change what happens next. It is still recorded and
+// reported (the DIGIT event), but it neither cuts the line off nor asks the
+// model for a turn: every key interrupted the line and got its own reply, so a
+// caller pressing 0 five times heard the goodbye in five fragments and the
+// transfer waited for the last full one.
 func (s *Session) pumpDigits() {
 	defer s.wg.Done()
 
@@ -902,6 +1003,11 @@ func (s *Session) pumpDigits() {
 		case digit, ok := <-digits:
 			if !ok {
 				return
+			}
+			if s.cfg.IsEndingArmed != nil && s.cfg.IsEndingArmed() {
+				s.log.Info("a keypress after the ending was armed is only recorded", "digit", digit)
+				s.emit(Event{Type: EventTypeDigit, Text: digit})
+				continue
 			}
 			s.bargeIn(provider.InterruptReasonDTMF)
 			s.emit(Event{Type: EventTypeDigit, Text: digit})

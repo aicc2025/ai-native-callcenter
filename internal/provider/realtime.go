@@ -90,23 +90,46 @@ type Realtime struct {
 	isCancelSentForSpeak  bool
 	isPreemptedForSpeak   bool
 
-	// The two fields a tool result answered mid-response needs. See
-	// SendToolResult and releaseToolTurn.
+	// The fields a request for a turn made while the floor is taken needs. See
+	// SendToolResult, SendUserText and releaseOwedTurn.
 	//
-	// isToolTurnOwed means a tool result is in the conversation and the turn
-	// it asks for has not been requested yet, because a response still held
-	// the floor when it arrived (W-Q4). It is a flag, not a count: however
-	// many results one response produced, they are answered in one turn.
+	// isTurnOwed means something is in the conversation that wants a turn
+	// (a tool result, or a cue) and the turn it asks for has not been
+	// requested yet, because a response still held the floor when it arrived
+	// (W-Q4). It is a flag, not a count: however many results and cues one
+	// response produced, they are answered in one turn.
+	// isOwedPastCreate marks a turn owed while a request was in flight and
+	// nothing was open yet. The response that request makes was asked for
+	// before the item, so it is not the turn that was owed and its creation
+	// must not discharge it.
 	// isCallerSpeaking means the provider has reported the caller starting to
 	// speak and neither the end of that speech nor a new response since. Its
 	// own turn detection answers that speech with a response of its own.
-	isToolTurnOwed   bool
+	isTurnOwed       bool
+	isOwedPastCreate bool
 	isCallerSpeaking bool
+
+	// callItems are the function calls the response now open has begun and not
+	// yet finished, by item id (the call id as the value), and finishedCalls the
+	// ones whose arguments did arrive, by both ids. They belong to one response:
+	// response.created clears them and response.done settles them. See
+	// removeUnfinishedCalls.
+	callItems     map[string]string
+	finishedCalls map[string]struct{}
+
+	// deleteSentAt is when this client last asked the provider to delete an
+	// item, which is what lets a refusal of that be recognised; see
+	// isAnsweredDelete.
+	deleteSentAt time.Time
 
 	// cancelSentAt is when this client last asked the provider to cancel a
 	// response. It is what lets a refusal of that cancel be recognised as
 	// the answer to our own request; see isAnsweredCancel.
 	cancelSentAt time.Time
+	// cancelReason is why that cancel was sent, so the provider's confirmation
+	// of it (a response that ends cancelled) names the decision that caused it
+	// rather than the default, speech. Spent when a response ends.
+	cancelReason InterruptReason
 
 	// dog ends a turn the provider has walked away from, and watch is the
 	// channel its progress signals travel on.
@@ -289,9 +312,38 @@ func (r *Realtime) SendAudio(audio []byte) error {
 }
 
 // SendUserText adds a caller turn that was not spoken and asks for a reply.
+//
+// While a response holds the floor, or one has been asked for and not yet
+// created, a second request is refused, and the refusal comes back as an async
+// error that nothing retries: the item would sit in the conversation
+// unanswered. So the reply is owed and asked for when that response ends,
+// exactly as a tool result's is (SendToolResult).
+//
+// After an interruption of our own the response stays open until the provider
+// confirms the cancel, so the reply to a keypress that cancelled a turn waits
+// one round trip for it. A request sent straight behind the cancel was
+// accepted by qwen, but that is the one provider it was measured on, and the
+// cue cannot tell here whether a cancel just went out; the wait is the
+// cheaper mistake than a refused cue.
 func (r *Realtime) SendUserText(text string) error {
 	if err := r.sendEvent(userTextItem(text)); err != nil {
 		return err
+	}
+	// Decided after the item is sent, as SendToolResult does, so a turn
+	// released by the read loop is never requested ahead of the item it answers.
+	r.mu.Lock()
+	isOpen := r.isResponseOpen.Load()
+	isOwed := isOpen || r.isResponseRequested || r.isTurnOwed
+	if isOwed {
+		r.isTurnOwed = true
+		if !isOpen && r.isResponseRequested {
+			r.isOwedPastCreate = true
+		}
+	}
+	r.mu.Unlock()
+	if isOwed {
+		r.log.Debug("a response holds the floor; the reply to this cue waits for it to end")
+		return nil
 	}
 	return r.requestResponse(map[string]any{"type": "response.create"})
 }
@@ -337,7 +389,7 @@ func (r *Realtime) SpeakText(text string, isClosing bool) error {
 	r.mu.Lock()
 	// An owed tool turn counts as a turn requested: the floor is spoken for,
 	// and asking now would be the second request the provider refuses.
-	isDeferred := r.isResponseOpen.Load() || r.isResponseRequested || r.isToolTurnOwed
+	isDeferred := r.isResponseOpen.Load() || r.isResponseRequested || r.isTurnOwed
 	isCancelNeeded := r.isResponseOpen.Load() && !r.isCancelSentForSpeak
 	if isCancelNeeded {
 		r.isCancelSentForSpeak = true
@@ -353,7 +405,7 @@ func (r *Realtime) SpeakText(text string, isClosing bool) error {
 	r.mu.Unlock()
 
 	if isCancelNeeded {
-		if err := r.sendCancel(); err != nil {
+		if err := r.sendCancel(InterruptReasonSystem); err != nil {
 			return err
 		}
 	}
@@ -367,7 +419,8 @@ func (r *Realtime) SpeakText(text string, isClosing bool) error {
 // it: the state requestResponse sets, set early. The caller holds mu.
 func (r *Realtime) claimFloorLocked() {
 	r.isResponseRequested = true
-	r.isToolTurnOwed = false
+	r.isTurnOwed = false
+	r.isOwedPastCreate = false
 }
 
 // askForLine asks for the turn that says one line, on a floor the caller has
@@ -442,13 +495,14 @@ var sayExactly = SayExactly
 // Between here and response.created there is nothing to cancel, which is what
 // SpeakText has to know before it asks for anything.
 //
-// Any request discharges an owed tool turn: the tool output is already in the
+// Any request discharges an owed turn: the tool output or cue is already in the
 // conversation, so whatever turn comes next is made with it in view, and a
 // second request on top of this one would be refused.
 func (r *Realtime) requestResponse(request map[string]any) error {
 	r.mu.Lock()
 	r.isResponseRequested = true
-	r.isToolTurnOwed = false
+	r.isTurnOwed = false
+	r.isOwedPastCreate = false
 	r.mu.Unlock()
 	return r.sendEvent(request)
 }
@@ -465,8 +519,11 @@ func (r *Realtime) onResponseCreated() {
 	// Whoever asked for this response — this client or the provider's own
 	// turn detection answering the caller — it is made with the tool output
 	// in view, so it is the turn that output was owed.
-	wasToolTurnOwed := r.isToolTurnOwed
-	r.isToolTurnOwed = false
+	wasTurnOwed := r.isTurnOwed && !r.isOwedPastCreate
+	if wasTurnOwed {
+		r.isTurnOwed = false
+	}
+	r.isOwedPastCreate = false
 	isCancelNeeded := r.pendingSpeak != "" && !r.isCancelSentForSpeak
 	if isCancelNeeded {
 		r.isCancelSentForSpeak = true
@@ -474,11 +531,11 @@ func (r *Realtime) onResponseCreated() {
 	}
 	r.mu.Unlock()
 
-	if wasToolTurnOwed {
+	if wasTurnOwed {
 		r.log.Debug("a new response answers the tool result that was waiting for the floor")
 	}
 	if isCancelNeeded {
-		if err := r.sendCancel(); err != nil {
+		if err := r.sendCancel(InterruptReasonSystem); err != nil {
 			r.log.Warn("could not stop the turn a spoken line replaces", "error", err)
 		}
 	}
@@ -521,7 +578,7 @@ func (r *Realtime) dispatchPendingSpeak() (wasPreempted bool) {
 // response while another response is in progress", qwen-findings W-Q4) —
 // OpenAI refuses it too. The turn the result was meant to produce is then
 // never made. So while a response is open, or a tool turn is already owed,
-// the request is owed instead of sent, and releaseToolTurn asks for it once
+// the request is owed instead of sent, and releaseOwedTurn asks for it once
 // that response is done. Several results in one response owe one turn.
 func (r *Realtime) SendToolResult(toolCallID, output, hint string) error {
 	if err := r.sendEvent(map[string]any{
@@ -540,9 +597,9 @@ func (r *Realtime) SendToolResult(toolCallID, output, hint string) error {
 	// the response ends in between, the floor is seen free here and the turn
 	// is asked for now.
 	r.mu.Lock()
-	isOwed := r.isResponseOpen.Load() || r.isToolTurnOwed
+	isOwed := r.isResponseOpen.Load() || r.isTurnOwed
 	if isOwed {
-		r.isToolTurnOwed = true
+		r.isTurnOwed = true
 	}
 	r.mu.Unlock()
 	if isOwed {
@@ -553,7 +610,7 @@ func (r *Realtime) SendToolResult(toolCallID, output, hint string) error {
 	return r.requestResponse(map[string]any{"type": "response.create"})
 }
 
-// releaseToolTurn asks for the turn a tool result is owed, now that the
+// releaseOwedTurn asks for the turn a tool result is owed, now that the
 // response that held the floor has ended. The read loop calls it after
 // dispatchPendingSpeak, so a line that was waiting has already taken the
 // floor and — through requestResponse — discharged the tool turn: the line
@@ -581,22 +638,22 @@ func (r *Realtime) SendToolResult(toolCallID, output, hint string) error {
 // still open may never answer it (echo of the bot's own audio is the usual
 // source), and a refused request costs a WARN where a stranded turn costs the
 // call its next line. The narrower hold is the cheaper mistake.
-func (r *Realtime) releaseToolTurn() {
+func (r *Realtime) releaseOwedTurn() {
 	r.mu.Lock()
-	if !r.isToolTurnOwed {
+	if !r.isTurnOwed {
 		r.mu.Unlock()
 		return
 	}
 	if r.isCallerSpeaking {
 		r.mu.Unlock()
-		r.log.Debug("the caller is speaking; the turn for the tool result is left to the provider's reply")
+		r.log.Debug("the caller is speaking; the owed turn is left to the provider's reply")
 		return
 	}
 	r.mu.Unlock()
 
-	r.log.Debug("the floor is free; asking for the turn the tool result was waiting for")
+	r.log.Debug("the floor is free; asking for the owed turn (a tool result or a cue was waiting)")
 	if err := r.requestResponse(map[string]any{"type": "response.create"}); err != nil {
-		r.log.Warn("could not ask for the turn a tool result was waiting for", "error", err)
+		r.log.Warn("could not ask for the owed turn", "error", err)
 	}
 }
 
@@ -649,7 +706,10 @@ func (r *Realtime) UpdateInstructions(text string) error {
 //
 // Which side is responsible differs by vendor: one cancels on its own as soon
 // as it hears speech and only needs to be told how much was actually heard;
-// the other does nothing until asked.
+// the other does nothing until asked. That self-cancel is a reaction to the
+// provider hearing the caller, so it covers speech and nothing else: a
+// keypress or an application decision is something the provider never heard,
+// and every profile has to be asked to cancel for it.
 //
 // The two halves answer different questions and are gated separately. A
 // response is cancelled only while one is open — asking a provider to cancel
@@ -667,8 +727,9 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 	itemID := r.responseItemID
 	r.mu.Unlock()
 
-	if !r.profile.CancelsResponseItself && r.isResponseOpen.Load() {
-		if err := r.sendCancel(); err != nil {
+	isHeardByProvider := reason == InterruptReasonSpeech && r.profile.CancelsResponseItself
+	if !isHeardByProvider && r.isResponseOpen.Load() {
+		if err := r.sendCancel(reason); err != nil {
 			return err
 		}
 	}
@@ -706,9 +767,10 @@ func (r *Realtime) Interrupt(reason InterruptReason, playedMs int) error {
 // provider may finish it in the round trip before the cancel arrives, and then
 // it refuses the cancel. No local state closes that window, so the refusal is
 // expected and has to be recognisable as ours — see isAnsweredCancel.
-func (r *Realtime) sendCancel() error {
+func (r *Realtime) sendCancel(reason InterruptReason) error {
 	r.mu.Lock()
 	r.cancelSentAt = time.Now()
+	r.cancelReason = reason
 	r.mu.Unlock()
 	return r.sendEvent(map[string]any{"type": "response.cancel"})
 }
@@ -731,7 +793,8 @@ const cancelAnswerWindow = 5 * time.Second
 // new response is requested before the refusal arrives, which is exactly what
 // a keypress or a spoken line does right after an interruption.
 func (r *Realtime) isAnsweredCancel(err *wireError) bool {
-	if err.Code != "invalid_value" ||
+	// qwen answers "invalid_value"; OpenAI names the code after the cancel.
+	if (err.Code != "invalid_value" && err.Code != "response_cancel_not_active") ||
 		!strings.Contains(strings.ToLower(err.Message), "no active response") {
 		return false
 	}
@@ -915,6 +978,7 @@ func (r *Realtime) handle(event *wireEvent) {
 	case "response.created":
 		r.mu.Lock()
 		r.responseItemID = ""
+		r.callItems, r.finishedCalls = nil, nil
 		r.mu.Unlock()
 		r.isResponseOpen.Store(true)
 		r.onResponseCreated()
@@ -930,6 +994,16 @@ func (r *Realtime) handle(event *wireEvent) {
 		if event.Item != nil && event.Item.ID != "" && isSpokenItem(event.Item.Type) {
 			r.mu.Lock()
 			r.responseItemID = event.Item.ID
+			r.mu.Unlock()
+		}
+		// A function call is open until its arguments are done; see
+		// removeUnfinishedCalls.
+		if event.Item != nil && event.Item.ID != "" && event.Item.Type == "function_call" {
+			r.mu.Lock()
+			if r.callItems == nil {
+				r.callItems = make(map[string]string)
+			}
+			r.callItems[event.Item.ID] = event.Item.CallID
 			r.mu.Unlock()
 		}
 
@@ -956,6 +1030,7 @@ func (r *Realtime) handle(event *wireEvent) {
 		r.emit(Event{Type: EventTypeInputTranscript, Text: event.Transcript, IsFinal: true})
 
 	case "response.function_call_arguments.done":
+		r.finishCall(event.ItemID, event.CallID)
 		arguments := event.Arguments
 		if arguments == "" {
 			arguments = "{}"
@@ -964,6 +1039,9 @@ func (r *Realtime) handle(event *wireEvent) {
 			Type: EventTypeToolCall, ToolCallID: event.CallID,
 			ToolName: event.Name, ToolArgs: arguments,
 		})
+
+	case "conversation.item.deleted":
+		r.log.Debug("the provider removed an item from the conversation", "itemId", event.ItemID)
 
 	case "response.done":
 		r.handleResponseDone(event)
@@ -978,14 +1056,18 @@ func (r *Realtime) handle(event *wireEvent) {
 
 func (r *Realtime) handleResponseDone(event *wireEvent) {
 	r.isResponseOpen.Store(false)
+	cancelledFor := r.takeCancelReason()
 	r.signal(watchResponseEnded)
+	// Before anything asks for a turn, so that turn is made from a
+	// conversation without the calls this one left unfinished.
+	r.removeUnfinishedCalls(event.Response)
 	// The floor is free: a line that was waiting for it goes out before the
 	// turn is reported, so the next words are already being made while the
 	// consumer catches up.
 	isPreemptedForSpeak := r.dispatchPendingSpeak()
 	// Then the turn a tool result answered mid-response is owed, unless the
 	// line just asked for is that turn.
-	r.releaseToolTurn()
+	r.releaseOwedTurn()
 
 	out := Event{Type: EventTypeResponseDone}
 	if event.Response != nil {
@@ -1012,6 +1094,9 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 	// record of the call.
 	if out.Status == statusCancelled {
 		by := InterruptReasonSpeech
+		if cancelledFor != "" {
+			by = cancelledFor
+		}
 		if isPreemptedForSpeak {
 			by = InterruptReasonSystem
 		}
@@ -1024,8 +1109,139 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 	r.emit(out)
 }
 
+// takeCancelReason returns why this client last cancelled, if it did so within
+// cancelAnswerWindow, and forgets it: one cancel explains one response's end.
+// A response that ended on its own after a cancel lost the race spends the
+// reason too, so it cannot label a later cancel the provider decides itself.
+func (r *Realtime) takeCancelReason() InterruptReason {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reason := r.cancelReason
+	r.cancelReason = ""
+	if time.Since(r.cancelSentAt) > cancelAnswerWindow {
+		return ""
+	}
+	return reason
+}
+
 // statusCancelled is what both providers call a response that was cut short.
 const statusCancelled = "cancelled"
+
+// statusCompleted is a response that ran to its end.
+const statusCompleted = "completed"
+
+// finishCall records that a function call's arguments arrived, so it is a call
+// the consumer has been handed and will answer, never one to take back. The
+// event names the item and the call; either may be missing in a dialect, so
+// both are kept.
+func (r *Realtime) finishCall(itemID, callID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finishedCalls == nil {
+		r.finishedCalls = make(map[string]struct{})
+	}
+	for id, call := range r.callItems {
+		if (itemID != "" && id == itemID) || (callID != "" && call == callID) {
+			delete(r.callItems, id)
+		}
+	}
+	if itemID != "" {
+		r.finishedCalls[itemID] = struct{}{}
+	}
+	if callID != "" {
+		r.finishedCalls[callID] = struct{}{}
+	}
+}
+
+// removeUnfinishedCalls takes out of the conversation every function call a
+// response that did not complete left half made.
+//
+// A response cut off while it is writing a call's arguments (a keypress, a
+// barge-in, a preempting line) leaves the call item in the conversation, with
+// whatever arguments had arrived, and the provider never sends the event that
+// finishes it. qwen's model then reads its own unanswered call as the thing it
+// has already done: asked again, it often says "transferring you" and never
+// calls the tool, and keeps copying that (qwen-findings W-Q5). Deleting the item
+// puts the next turn back on a history without it.
+//
+// Which calls: those begun in this response (output_item.added) or listed in
+// its output, minus any whose arguments completed. A completed call was handed
+// to the consumer as a tool call and will get its output, so it stays. Which
+// responses: any that did not complete, because cancelled, incomplete and
+// failed all stop mid-item and all leave the same remnant. A completed response
+// is left alone. The stall path does not come here: the provider has not said
+// that response is over and may still finish the call, and deleting an item
+// that then gets its arguments and its output would break a call the consumer
+// is answering.
+//
+// A refused delete is not a fault (an item already gone, or a provider without
+// the event); see isAnsweredDelete.
+func (r *Realtime) removeUnfinishedCalls(response *wireResponse) {
+	r.mu.Lock()
+	open, finished := r.callItems, r.finishedCalls
+	r.callItems, r.finishedCalls = nil, nil
+	r.mu.Unlock()
+
+	if response == nil || response.Status == "" || response.Status == statusCompleted {
+		return
+	}
+	ids := make(map[string]struct{}, len(open))
+	for id := range open {
+		ids[id] = struct{}{}
+	}
+	for _, item := range response.Output {
+		if item.Type != "function_call" || item.ID == "" {
+			continue
+		}
+		_, isItemFinished := finished[item.ID]
+		_, isCallFinished := finished[item.CallID]
+		if !isItemFinished && !(item.CallID != "" && isCallFinished) {
+			ids[item.ID] = struct{}{}
+		}
+	}
+	for id := range ids {
+		r.mu.Lock()
+		r.deleteSentAt = time.Now()
+		r.mu.Unlock()
+		if err := r.sendEvent(map[string]any{
+			"type":    "conversation.item.delete",
+			"item_id": id,
+		}); err != nil {
+			r.log.Debug("could not take an unfinished function call out of the conversation",
+				"itemId", id, "error", err)
+			continue
+		}
+		r.log.Debug("took the function call a cancelled response left unfinished out of the conversation",
+			"itemId", id, "status", response.Status)
+	}
+}
+
+// isAnsweredDelete reports whether an error is the provider refusing an item
+// delete this client sent: the item was already gone, or the dialect does not
+// have the event. Either way the history is as clean as it can be made, so it
+// is not reported.
+//
+// Matched like isAnsweredCancel: within cancelAnswerWindow of a delete we sent,
+// and on words that name a missing item or an unsupported event, because the
+// error names neither the frame it refuses nor the item.
+func (r *Realtime) isAnsweredDelete(err *wireError) bool {
+	r.mu.Lock()
+	sentAt := r.deleteSentAt
+	r.mu.Unlock()
+	if sentAt.IsZero() || time.Since(sentAt) > cancelAnswerWindow {
+		return false
+	}
+	message := strings.ToLower(err.Message)
+	if err.Code == "item_not_found" || err.Param == "item_id" {
+		return true
+	}
+	for _, words := range []string{"not found", "does not exist", "no such item", "unknown event", "unsupported", "not supported", "conversation.item.delete"} {
+		if strings.Contains(message, words) {
+			return true
+		}
+	}
+	return false
+}
 
 func (r *Realtime) handleError(event *wireEvent) {
 	if event.Error == nil {
@@ -1054,6 +1270,12 @@ func (r *Realtime) handleError(event *wireEvent) {
 	// something.
 	if r.isAnsweredCancel(err) {
 		r.log.Debug("the provider refused a cancel because the response had already ended",
+			"code", err.Code, "message", err.Message)
+		return
+	}
+
+	if r.isAnsweredDelete(err) {
+		r.log.Debug("the provider refused to delete an item",
 			"code", err.Code, "message", err.Message)
 		return
 	}
@@ -1107,7 +1329,7 @@ func (r *Realtime) onResponseStalled(hasAudioArrived bool) {
 	// a turn the provider walked away from would wait for ever.
 	r.dispatchPendingSpeak()
 	// Nor would a tool result's turn that was waiting for it.
-	r.releaseToolTurn()
+	r.releaseOwedTurn()
 	// Not fatal: the session is still usable, and the caller has heard
 	// whatever did arrive. The flow decides what to say next.
 	r.emit(Event{Type: EventTypeError, Text: reason,

@@ -131,7 +131,8 @@ type fakeModel struct {
 	// what was already true at the moment a tool was answered.
 	onToolResult func()
 	// calls names the conversation-control methods in the order they were
-	// called: SendToolResult, UpdateInstructions, SpeakText.
+	// called: SendToolResult, UpdateInstructions, SpeakText, SendUserText,
+	// Interrupt.
 	calls []string
 }
 
@@ -168,6 +169,7 @@ func (m *fakeModel) SendUserText(text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.userText = append(m.userText, text)
+	m.calls = append(m.calls, "SendUserText")
 	return nil
 }
 
@@ -220,6 +222,7 @@ func (m *fakeModel) Interrupt(reason provider.InterruptReason, playedMs int) err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.interrupts = append(m.interrupts, interrupt{reason, playedMs})
+	m.calls = append(m.calls, "Interrupt")
 	return nil
 }
 
@@ -722,6 +725,71 @@ func TestSpeechDetectedAfterTheGuardInterrupts(t *testing.T) {
 	}
 }
 
+// speakForAWhile plays one chunk of model speech and waits for the session to
+// have queued all of it.
+func speakForAWhile(t *testing.T, leg *fakeLeg, model *fakeModel, frames int) {
+	t.Helper()
+	before := len(leg.sentFrames())
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	model.events <- provider.Event{
+		Type:  provider.EventTypeAudioDelta,
+		Audio: make([]byte, media.FrameSamples*2*frames),
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(leg.sentFrames()) < before+frames && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(leg.sentFrames()); got < before+frames {
+		t.Fatalf("only %d of %d frames were queued", got-before, frames)
+	}
+}
+
+// The guard covers the caller starting to hear the bot, not each turn's first
+// chunk. A second turn queued behind the first, with the queue never empty
+// between them, is the same stretch of speech: the caller has heard the bot
+// for well over the guard when the second one starts, so speech over it is a
+// real interruption.
+func TestTheGuardIsNotRestartedByATurnQueuedBehindAnother(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: 300 * time.Millisecond, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+
+	speakForAWhile(t, leg, model, 4)
+	// Everything from here on is queued behind audio still playing.
+	leg.holdFrames(100)
+	time.Sleep(400 * time.Millisecond)
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
+	speakForAWhile(t, leg, model, 4)
+
+	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+	if got := model.recordedInterrupts(); len(got) != 1 {
+		t.Errorf("recorded %d interrupts, want 1", len(got))
+	}
+}
+
+// Once the queue has drained the caller hears silence, and the next audio is a
+// new start: speech inside the guard of it is still taken for echo, however
+// long ago the previous turn began.
+func TestTheGuardRestartsWhenTheBotBecomesAudibleAfterSilence(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: 300 * time.Millisecond, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+
+	speakForAWhile(t, leg, model, 4)
+	// The fake leg drains instantly, so the queue is empty; wait past the
+	// guard, and past the audio's own length, so the next turn is a new start.
+	time.Sleep(400 * time.Millisecond)
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
+	speakForAWhile(t, leg, model, 4)
+
+	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	time.Sleep(100 * time.Millisecond)
+	if got := model.recordedInterrupts(); len(got) != 0 {
+		t.Errorf("the bot interrupted itself inside the guard of new audio: %+v", got)
+	}
+}
+
 // A keypress cannot be an echo of anything, so the guard does not apply to it.
 func TestAKeypressInterruptsEvenInsideTheGuard(t *testing.T) {
 	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
@@ -744,6 +812,72 @@ func TestAKeypressInterruptsEvenInsideTheGuard(t *testing.T) {
 	interrupts := model.recordedInterrupts()
 	if len(interrupts) != 1 || interrupts[0].reason != provider.InterruptReasonDTMF {
 		t.Errorf("interrupts = %+v, want the keypress to have cut in", interrupts)
+	}
+}
+
+// A turn that is being made and has not spoken yet has nothing queued, but it
+// is still the bot's floor: left running it answers what came before the key,
+// and the cue's own request for a reply collides with it. The keypress cancels
+// it first.
+func TestAKeypressTakesTheFloorFromATurnThatHasNotSpokenYet(t *testing.T) {
+	session, _, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: 10 * time.Second, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	startATurnWithNoAudio(t, session, model)
+
+	model.mu.Lock()
+	model.calls = nil // only what the keypress causes
+	model.mu.Unlock()
+	session.leg.(*fakeLeg).digits <- "0"
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(model.recordedUserText()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	model.mu.Lock()
+	calls := append([]string(nil), model.calls...)
+	model.mu.Unlock()
+	if len(calls) != 2 || calls[0] != "Interrupt" || calls[1] != "SendUserText" {
+		t.Fatalf("calls = %v, want the cancel before the cue", calls)
+	}
+	interrupts := model.recordedInterrupts()
+	if interrupts[0].reason != provider.InterruptReasonDTMF {
+		t.Errorf("reason = %q, want the keypress", interrupts[0].reason)
+	}
+	// Nothing was ever queued, so there is nothing to trim from the history.
+	if interrupts[0].playedMs >= 0 {
+		t.Errorf("playedMs = %d, want a negative (unknown) value so nothing is truncated",
+			interrupts[0].playedMs)
+	}
+}
+
+// Detected speech over a turn that has not spoken is the provider's to handle:
+// it cancels its own response, and there is no audio here to echo or to flush.
+func TestSpeechOverATurnThatHasNotSpokenYetDoesNothing(t *testing.T) {
+	session, _, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: -1, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	startATurnWithNoAudio(t, session, model)
+
+	model.events <- provider.Event{Type: provider.EventTypeSpeechStarted}
+	time.Sleep(100 * time.Millisecond)
+	if got := model.recordedInterrupts(); len(got) != 0 {
+		t.Errorf("interrupts = %+v, want none", got)
+	}
+}
+
+// startATurnWithNoAudio opens a model turn that has produced nothing yet and
+// waits until the session has seen it.
+func startATurnWithNoAudio(t *testing.T, session *Session, model *fakeModel) {
+	t.Helper()
+	model.events <- provider.Event{Type: provider.EventTypeResponseStarted}
+	deadline := time.Now().Add(2 * time.Second)
+	for !session.isHoldingTheFloor() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !session.isHoldingTheFloor() {
+		t.Fatal("the session never saw the turn start")
 	}
 }
 
@@ -1382,5 +1516,94 @@ func TestTheSessionLogsTheCallIdOnce(t *testing.T) {
 	}
 	if !strings.Contains(bridged, `"callId":"dialog-call-id"`) {
 		t.Errorf("the line does not carry the call's own id: %s", bridged)
+	}
+}
+
+// A keypress once the ending is armed is still reported to whoever records the
+// call, and logged; it just does nothing to the line or the model.
+func TestAKeypressAfterTheEndingIsArmedIsStillReported(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(), Config{
+		BargeGuard: -1, NoInput: -1, IsEndingArmed: func() bool { return true },
+	})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	speakForAWhile(t, leg, model, 4)
+	leg.holdFrames(50)
+
+	leg.digits <- "7"
+	if event := awaitBridgeEvent(t, session, EventTypeDigit); event.Text != "7" {
+		t.Errorf("digit = %q", event.Text)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := model.recordedInterrupts(); len(got) != 0 {
+		t.Errorf("interrupts = %+v, want none", got)
+	}
+	if got := model.recordedUserText(); len(got) != 0 {
+		t.Errorf("user text = %v, want none", got)
+	}
+}
+
+//
+// Audio of a response that was cut off.
+//
+
+// The provider goes on streaming a cancelled response for a moment, and those
+// chunks arrive after the flush. Queued, they played as the tail of the answer
+// the caller had just interrupted (a live call heard 40-80 ms of it each time).
+func TestAudioOfAResponseThatWasCutOffIsNotPlayed(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: 10 * time.Second, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	speakForAWhile(t, leg, model, 4)
+
+	leg.digits <- "0"
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+	before := len(leg.sentFrames())
+
+	// The cancelled response's deltas still in flight.
+	model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*3),
+	}
+	model.events <- provider.Event{Type: provider.EventTypeInterrupted,
+		Status: "cancelled", InterruptedBy: provider.InterruptReasonDTMF}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+	model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*3),
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := len(leg.sentFrames()); got != before {
+		t.Fatalf("%d frames of a cut-off response reached the caller", got-before)
+	}
+
+	// The next turn is a new response and is heard.
+	speakForAWhile(t, leg, model, 4)
+}
+
+// Speech over the tail of a turn that has finished generating leaves nothing
+// to cut off: no response is open, so nothing more is coming, and the fence
+// must not wait on a turn to clear it.
+func TestABargeInOverAFinishedTurnsTailDoesNotFenceTheNextTurn(t *testing.T) {
+	session, leg, model := startBridgeWith(t, provider.OpenAIProfile(),
+		Config{BargeGuard: -1, NoInput: -1})
+	awaitBridgeEvent(t, session, EventTypeReady)
+	speakForAWhile(t, leg, model, 4)
+	model.events <- provider.Event{Type: provider.EventTypeResponseDone}
+	awaitBridgeEvent(t, session, EventTypeTurnDone)
+	leg.holdFrames(20)
+
+	leg.digits <- "0"
+	awaitBridgeEvent(t, session, EventTypeBargeIn)
+	leg.holdFrames(0)
+
+	// Audio straight after, even before a ResponseStarted, is not dropped.
+	before := len(leg.sentFrames())
+	model.events <- provider.Event{
+		Type: provider.EventTypeAudioDelta, Audio: make([]byte, media.FrameSamples*2*2),
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(leg.sentFrames()) < before+2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(leg.sentFrames()); got < before+2 {
+		t.Fatalf("only %d of 2 frames reached the caller", got-before)
 	}
 }
