@@ -109,6 +109,19 @@ type Realtime struct {
 	isOwedPastCreate bool
 	isCallerSpeaking bool
 
+	// callItems are the function calls the response now open has begun and not
+	// yet finished, by item id (the call id as the value), and finishedCalls the
+	// ones whose arguments did arrive, by both ids. They belong to one response:
+	// response.created clears them and response.done settles them. See
+	// removeUnfinishedCalls.
+	callItems     map[string]string
+	finishedCalls map[string]struct{}
+
+	// deleteSentAt is when this client last asked the provider to delete an
+	// item, which is what lets a refusal of that be recognised; see
+	// isAnsweredDelete.
+	deleteSentAt time.Time
+
 	// cancelSentAt is when this client last asked the provider to cancel a
 	// response. It is what lets a refusal of that cancel be recognised as
 	// the answer to our own request; see isAnsweredCancel.
@@ -960,6 +973,7 @@ func (r *Realtime) handle(event *wireEvent) {
 	case "response.created":
 		r.mu.Lock()
 		r.responseItemID = ""
+		r.callItems, r.finishedCalls = nil, nil
 		r.mu.Unlock()
 		r.isResponseOpen.Store(true)
 		r.onResponseCreated()
@@ -975,6 +989,16 @@ func (r *Realtime) handle(event *wireEvent) {
 		if event.Item != nil && event.Item.ID != "" && isSpokenItem(event.Item.Type) {
 			r.mu.Lock()
 			r.responseItemID = event.Item.ID
+			r.mu.Unlock()
+		}
+		// A function call is open until its arguments are done; see
+		// removeUnfinishedCalls.
+		if event.Item != nil && event.Item.ID != "" && event.Item.Type == "function_call" {
+			r.mu.Lock()
+			if r.callItems == nil {
+				r.callItems = make(map[string]string)
+			}
+			r.callItems[event.Item.ID] = event.Item.CallID
 			r.mu.Unlock()
 		}
 
@@ -1001,6 +1025,7 @@ func (r *Realtime) handle(event *wireEvent) {
 		r.emit(Event{Type: EventTypeInputTranscript, Text: event.Transcript, IsFinal: true})
 
 	case "response.function_call_arguments.done":
+		r.finishCall(event.ItemID, event.CallID)
 		arguments := event.Arguments
 		if arguments == "" {
 			arguments = "{}"
@@ -1009,6 +1034,9 @@ func (r *Realtime) handle(event *wireEvent) {
 			Type: EventTypeToolCall, ToolCallID: event.CallID,
 			ToolName: event.Name, ToolArgs: arguments,
 		})
+
+	case "conversation.item.deleted":
+		r.log.Debug("the provider removed an item from the conversation", "itemId", event.ItemID)
 
 	case "response.done":
 		r.handleResponseDone(event)
@@ -1024,6 +1052,9 @@ func (r *Realtime) handle(event *wireEvent) {
 func (r *Realtime) handleResponseDone(event *wireEvent) {
 	r.isResponseOpen.Store(false)
 	r.signal(watchResponseEnded)
+	// Before anything asks for a turn, so that turn is made from a
+	// conversation without the calls this one left unfinished.
+	r.removeUnfinishedCalls(event.Response)
 	// The floor is free: a line that was waiting for it goes out before the
 	// turn is reported, so the next words are already being made while the
 	// consumer catches up.
@@ -1072,6 +1103,122 @@ func (r *Realtime) handleResponseDone(event *wireEvent) {
 // statusCancelled is what both providers call a response that was cut short.
 const statusCancelled = "cancelled"
 
+// statusCompleted is a response that ran to its end.
+const statusCompleted = "completed"
+
+// finishCall records that a function call's arguments arrived, so it is a call
+// the consumer has been handed and will answer, never one to take back. The
+// event names the item and the call; either may be missing in a dialect, so
+// both are kept.
+func (r *Realtime) finishCall(itemID, callID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finishedCalls == nil {
+		r.finishedCalls = make(map[string]struct{})
+	}
+	for id, call := range r.callItems {
+		if (itemID != "" && id == itemID) || (callID != "" && call == callID) {
+			delete(r.callItems, id)
+		}
+	}
+	if itemID != "" {
+		r.finishedCalls[itemID] = struct{}{}
+	}
+	if callID != "" {
+		r.finishedCalls[callID] = struct{}{}
+	}
+}
+
+// removeUnfinishedCalls takes out of the conversation every function call a
+// response that did not complete left half made.
+//
+// A response cut off while it is writing a call's arguments (a keypress, a
+// barge-in, a preempting line) leaves the call item in the conversation, with
+// whatever arguments had arrived, and the provider never sends the event that
+// finishes it. qwen's model then reads its own unanswered call as the thing it
+// has already done: asked again, it often says "transferring you" and never
+// calls the tool, and keeps copying that (qwen-findings W-Q5). Deleting the item
+// puts the next turn back on a history without it.
+//
+// Which calls: those begun in this response (output_item.added) or listed in
+// its output, minus any whose arguments completed. A completed call was handed
+// to the consumer as a tool call and will get its output, so it stays. Which
+// responses: any that did not complete, because cancelled, incomplete and
+// failed all stop mid-item and all leave the same remnant. A completed response
+// is left alone. The stall path does not come here: the provider has not said
+// that response is over and may still finish the call, and deleting an item
+// that then gets its arguments and its output would break a call the consumer
+// is answering.
+//
+// A refused delete is not a fault (an item already gone, or a provider without
+// the event); see isAnsweredDelete.
+func (r *Realtime) removeUnfinishedCalls(response *wireResponse) {
+	r.mu.Lock()
+	open, finished := r.callItems, r.finishedCalls
+	r.callItems, r.finishedCalls = nil, nil
+	r.mu.Unlock()
+
+	if response == nil || response.Status == "" || response.Status == statusCompleted {
+		return
+	}
+	ids := make(map[string]struct{}, len(open))
+	for id := range open {
+		ids[id] = struct{}{}
+	}
+	for _, item := range response.Output {
+		if item.Type != "function_call" || item.ID == "" {
+			continue
+		}
+		_, isItemFinished := finished[item.ID]
+		_, isCallFinished := finished[item.CallID]
+		if !isItemFinished && !(item.CallID != "" && isCallFinished) {
+			ids[item.ID] = struct{}{}
+		}
+	}
+	for id := range ids {
+		r.mu.Lock()
+		r.deleteSentAt = time.Now()
+		r.mu.Unlock()
+		if err := r.sendEvent(map[string]any{
+			"type":    "conversation.item.delete",
+			"item_id": id,
+		}); err != nil {
+			r.log.Debug("could not take an unfinished function call out of the conversation",
+				"itemId", id, "error", err)
+			continue
+		}
+		r.log.Debug("took the function call a cancelled response left unfinished out of the conversation",
+			"itemId", id, "status", response.Status)
+	}
+}
+
+// isAnsweredDelete reports whether an error is the provider refusing an item
+// delete this client sent: the item was already gone, or the dialect does not
+// have the event. Either way the history is as clean as it can be made, so it
+// is not reported.
+//
+// Matched like isAnsweredCancel: within cancelAnswerWindow of a delete we sent,
+// and on words that name a missing item or an unsupported event, because the
+// error names neither the frame it refuses nor the item.
+func (r *Realtime) isAnsweredDelete(err *wireError) bool {
+	r.mu.Lock()
+	sentAt := r.deleteSentAt
+	r.mu.Unlock()
+	if sentAt.IsZero() || time.Since(sentAt) > cancelAnswerWindow {
+		return false
+	}
+	message := strings.ToLower(err.Message)
+	if err.Code == "item_not_found" || err.Param == "item_id" {
+		return true
+	}
+	for _, words := range []string{"not found", "does not exist", "no such item", "unknown event", "unsupported", "not supported", "conversation.item.delete"} {
+		if strings.Contains(message, words) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Realtime) handleError(event *wireEvent) {
 	if event.Error == nil {
 		r.emit(Event{Type: EventTypeError, Err: errors.New("provider reported an unspecified error")})
@@ -1099,6 +1246,12 @@ func (r *Realtime) handleError(event *wireEvent) {
 	// something.
 	if r.isAnsweredCancel(err) {
 		r.log.Debug("the provider refused a cancel because the response had already ended",
+			"code", err.Code, "message", err.Message)
+		return
+	}
+
+	if r.isAnsweredDelete(err) {
+		r.log.Debug("the provider refused to delete an item",
 			"code", err.Code, "message", err.Message)
 		return
 	}

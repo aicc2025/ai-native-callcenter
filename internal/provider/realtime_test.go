@@ -1859,3 +1859,159 @@ func TestARealStallIsStillCaught(t *testing.T) {
 		}
 	}
 }
+
+// beginACallThatIsNeverFinished plays the greeting out and opens a turn in
+// which the model starts a function call: the item is added and some of its
+// arguments stream, and the arguments never complete.
+func beginACallThatIsNeverFinished(t *testing.T, f *fakeProvider, session *Realtime) {
+	t.Helper()
+	finishTheOpeningTurn(t, f, session)
+	f.send(map[string]any{"type": "response.created"})
+	awaitEvent(t, session, EventTypeResponseStarted)
+	f.send(map[string]any{"type": "response.output_item.added",
+		"item": map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}})
+	f.send(map[string]any{"type": "response.function_call_arguments.delta",
+		"item_id": "item_fc", "call_id": "call_fc", "delta": `{"queue": `})
+}
+
+// The live defect (qwen-findings W-Q5): a response cut off while it writes a
+// call's arguments leaves the call in the conversation, unanswered, and the
+// model then says it is transferring without calling the tool. The call comes
+// out of the conversation before the turn that was owed is asked for.
+func TestACancelledResponseTakesItsUnfinishedCallOutBeforeTheOwedTurn(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+
+	if err := session.SendUserText("(The caller pressed 0 on their keypad.)"); err != nil {
+		t.Fatalf("send cue: %v", err)
+	}
+	f.awaitMessages("response.create", 1)
+	f.awaitMessages("conversation.item.delete", 0)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "cancelled",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call",
+			"call_id": "call_fc", "arguments": `{"queue": `}},
+	}})
+	awaitEvent(t, session, EventTypeInterrupted)
+
+	deletes := f.awaitMessages("conversation.item.delete", 1)
+	if deletes[0]["item_id"] != "item_fc" {
+		t.Errorf("deleted %v, want item_fc", deletes[0]["item_id"])
+	}
+	f.awaitMessages("response.create", 2)
+	types := typesOf(f.messages())
+	if deleteAt, createAt := indexOf(types, "conversation.item.delete"), len(types)-1-indexOf(reversed(types), "response.create"); deleteAt > createAt {
+		t.Errorf("the owed turn was asked for before the call was taken out: %v", types)
+	}
+}
+
+// A call whose arguments completed was handed to the consumer, who answers it;
+// taking it back would leave its output pointing at nothing.
+func TestACancelledResponseKeepsACallThatFinished(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+	f.send(map[string]any{"type": "response.function_call_arguments.done",
+		"item_id": "item_fc", "call_id": "call_fc", "name": "transfer_to_agent", "arguments": `{}`})
+	awaitEvent(t, session, EventTypeToolCall)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "cancelled",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}},
+	}})
+	awaitEvent(t, session, EventTypeInterrupted)
+	f.awaitMessages("conversation.item.delete", 0)
+}
+
+// A call whose arguments completed under the call id alone (a dialect that
+// leaves the item id off the event) is just as finished.
+func TestACallFinishedByCallIDAloneIsKept(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+	f.send(map[string]any{"type": "response.function_call_arguments.done",
+		"call_id": "call_fc", "name": "transfer_to_agent", "arguments": `{}`})
+	awaitEvent(t, session, EventTypeToolCall)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "cancelled",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}},
+	}})
+	awaitEvent(t, session, EventTypeInterrupted)
+	f.awaitMessages("conversation.item.delete", 0)
+}
+
+// A response that ran to its end has nothing to take back.
+func TestACompletedResponseDeletesNothing(t *testing.T) {
+	f := newFakeProvider(t, acceptSession)
+	session := testSession(t, f, QwenProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "completed",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}},
+	}})
+	awaitEvent(t, session, EventTypeResponseDone)
+	f.awaitMessages("conversation.item.delete", 0)
+}
+
+// An item the provider no longer has, or a provider without the event, answers
+// the delete with an error. History is as clean as it can be made, so nothing
+// is reported; the same words long after a delete are still an error.
+func TestARefusedDeleteIsNotAnError(t *testing.T) {
+	f := newFakeProvider(t, func(f *fakeProvider, message map[string]any) {
+		acceptSession(f, message)
+		if message["type"] == "conversation.item.delete" {
+			f.send(map[string]any{"type": "error", "error": map[string]any{
+				"type": "invalid_request_error", "code": "item_not_found",
+				"message": "Item with id 'item_fc' not found"}})
+		}
+	})
+	session := testSession(t, f, OpenAIProfile())
+	if err := session.Start(t.Context(), basicConfig()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	awaitEvent(t, session, EventTypeSessionReady)
+	beginACallThatIsNeverFinished(t, f, session)
+
+	f.send(map[string]any{"type": "response.done", "response": map[string]any{
+		"status": "cancelled",
+		"output": []any{map[string]any{"id": "item_fc", "type": "function_call", "call_id": "call_fc"}},
+	}})
+	f.awaitMessages("conversation.item.delete", 1)
+
+	// The refusal has reached the client once a later event is handled.
+	f.send(map[string]any{"type": "response.created"})
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-session.Events():
+			if event.Type == EventTypeError {
+				t.Fatalf("a refused delete surfaced as an error: %v", event.Err)
+			}
+			if event.Type == EventTypeResponseStarted {
+				return
+			}
+		case <-deadline:
+			t.Fatal("no response.created event arrived")
+		}
+	}
+}
