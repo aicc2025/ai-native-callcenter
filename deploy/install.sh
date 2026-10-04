@@ -1024,11 +1024,14 @@ do_uninstall() {
 }
 
 final_output() {
+    _fo_seed=$(env_get "$ENV_FILE" AICC_SEED)
+    _fo_dc='docker compose'
+    [ "$OS" = linux ] && _fo_dc='sudo docker compose'
     say ""
     say "The call center is running."
     say ""
     say "  Web:        http://$EXTERNAL_IP:$(env_get "$ENV_FILE" HTTP_PORT | grep . || echo 8080)"
-    if [ "$(env_get "$ENV_FILE" AICC_SEED)" = demo ]; then
+    if [ "$_fo_seed" = demo ]; then
         if [ "$FIRST_INSTALL" = 1 ]; then
             say "  Sign in:    admin / $(env_get "$ENV_FILE" AICC_SEED_PASSWORD)"
             say "              (also the password of the demo's agents; kept in $ENV_FILE)"
@@ -1037,12 +1040,14 @@ final_output() {
         fi
     else
         say "  Sign in:    no demo accounts were seeded; create the first one:"
-        say "              cd $DIR && docker compose exec aicc aicc useradd -username admin -password '<password>' -role ADMIN"
+        say "              cd $DIR && $_fo_dc exec aicc aicc useradd -username admin -password '<password>' -role ADMIN"
     fi
     say "  Phone:      install the browser phone, $EXTENSION_URL"
     say "              and add $EXTERNAL_IP in the extension's Allow Sites"
-    say ""
-    say "Next: sign in as an agent, then dial 95001 (English) / 95002 (Chinese)."
+    if [ "$_fo_seed" = demo ]; then
+        say ""
+        say "Next: sign in as an agent, then dial 95001 (English) / 95002 (Chinese)."
+    fi
     if [ "$PROVIDER" = none ]; then
         say "No provider: the bot will not answer; calls to 95001/95002 go to the support queues; the human path works."
     fi

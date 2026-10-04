@@ -49,10 +49,13 @@ curl -fsSL https://github.com/rasonyang/ai-native-callcenter/releases/latest/dow
 `--provider none` installs with the AI leg off and no key. A rerun never
 replaces a non-empty key; to change the provider or fix a key, edit `.env` in
 the install directory (`/opt/aicc/.env` on Linux, `~/.aicc/.env` on macOS) and
-rerun the installer, or `docker compose up -d` there. Turning the bot back on
-after `--provider none` also means removing the `AICC_BOT_ENABLED=false` line
-(or setting it to `true`). `aicc doctor`'s `provider_key` and
-`provider_session` checks say whether the key reached the app.
+rerun the installer, or `docker compose up -d` there. On Linux both need root:
+the install directory and its `.env` belong to root, so edit with `sudo`, run
+compose as `sudo docker compose`, and rerun the installer with `sudo -E` when
+the new key is exported. Turning the bot back on after `--provider none` also
+means removing the `AICC_BOT_ENABLED=false` line (or setting it to `true`).
+`aicc doctor`'s `provider_key` and `provider_session` checks say whether the
+key reached the app.
 
 ## What you get
 
@@ -74,18 +77,22 @@ names that key. The demo agents (`amy`, `ben`, `wei`), `supervisor` and the
 seeded SIP extensions and customer numbers share that password.
 
 ```sh
-grep AICC_SEED_PASSWORD /opt/aicc/.env    # Linux
-grep AICC_SEED_PASSWORD ~/.aicc/.env      # macOS
+sudo grep AICC_SEED_PASSWORD /opt/aicc/.env    # Linux, root-owned mode 0600
+grep AICC_SEED_PASSWORD ~/.aicc/.env           # macOS
 ```
 
 The seed never overwrites an account that exists, so a password changed in the
 app stays changed; `.env` keeps the value the seed first used.
 
 An install made with `--no-demo` seeds no accounts. Create the first
-administrator inside the application container (`cd ~/.aicc` on macOS):
+administrator inside the application container:
 
 ```sh
-cd /opt/aicc && docker compose exec aicc aicc useradd -username admin -password '<password>' -role ADMIN
+# Linux: the install directory and .env belong to root
+cd /opt/aicc && sudo docker compose exec aicc aicc useradd -username admin -password '<password>' -role ADMIN
+
+# macOS
+cd ~/.aicc && docker compose exec aicc aicc useradd -username admin -password '<password>' -role ADMIN
 ```
 
 ## Supported platforms

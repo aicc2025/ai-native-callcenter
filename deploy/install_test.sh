@@ -308,12 +308,17 @@ PROVIDER=none
 EXTERNAL_IP=192.0.2.1
 START=0
 FIRST_INSTALL=1
+OS=linux
 final_output >"$TMP/output-no-demo.txt"
-ok 'final_output: no demo names the first-admin command' grep -q 'aicc useradd -username admin' "$TMP/output-no-demo.txt"
+ok 'final_output: no demo names the first-admin command' grep -q 'sudo docker compose exec aicc aicc useradd' "$TMP/output-no-demo.txt"
 notok 'final_output: no demo prints no seeded password' grep -q secret "$TMP/output-no-demo.txt"
+notok 'final_output: no demo drops the demo dial line' grep -q 'dial 95001' "$TMP/output-no-demo.txt"
 FIRST_INSTALL=0
 final_output >"$TMP/output-no-demo-rerun.txt"
-ok 'final_output: no demo rerun keeps the hint' grep -q 'aicc useradd -username admin' "$TMP/output-no-demo-rerun.txt"
+ok 'final_output: no demo rerun keeps the hint' grep -q 'sudo docker compose exec aicc aicc useradd' "$TMP/output-no-demo-rerun.txt"
+OS=macos
+final_output >"$TMP/output-no-demo-macos.txt"
+notok 'final_output: macOS first-admin command has no sudo' grep -q 'sudo docker' "$TMP/output-no-demo-macos.txt"
 
 env="$TMP/output-demo.env"
 cat >"$env" <<'EOF'
@@ -325,6 +330,7 @@ ENV_FILE="$env"
 FIRST_INSTALL=1
 final_output >"$TMP/output-demo.txt"
 ok 'final_output: demo prints the admin password' grep -q 'admin / secret' "$TMP/output-demo.txt"
+ok 'final_output: demo keeps the dial line' grep -q 'dial 95001' "$TMP/output-demo.txt"
 
 printf '\n%d tests, %d failed\n' "$tests" "$failures"
 [ "$failures" = 0 ]

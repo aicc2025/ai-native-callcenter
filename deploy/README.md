@@ -63,8 +63,11 @@ allowing the stack's ports ([Ports and firewall](#ports-and-firewall)).
   queues.
 - Secrets: `POSTGRES_PASSWORD`, `ESL_PASSWORD`, `LUA_PASSWORD` and
   `AICC_SEED_PASSWORD` are generated (32 random characters each) and written
-  to `<dir>/.env`, mode 0600. The installer prints the admin password once, on
-  the first install; afterwards it is `AICC_SEED_PASSWORD` in `.env`.
+  to `<dir>/.env`, mode 0600. With the demo seed (the default), the installer
+  prints the admin password once, on the first install; afterwards it is
+  `AICC_SEED_PASSWORD` in `.env`. An install made with `--no-demo` seeds no
+  account, so the installer prints the `aicc useradd` command that creates the
+  first administrator instead (as root on Linux).
 
 `--yes` never prompts: it accepts confirmations and fails on any value it
 would have had to ask for.
