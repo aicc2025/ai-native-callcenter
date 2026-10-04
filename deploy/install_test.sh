@@ -269,6 +269,14 @@ env_merge "$env"
 eq 'gateway: endpoint' "$(env_get "$env" AICC_PROVIDER_ENDPOINT)" wss://gw.example.com/v1/realtime
 eq 'gateway: key' "$(env_get "$env" REALTIME_API_KEY)" sk-test
 
+# gemini: key.
+env="$TMP/gemini.env"
+PROVIDER=gemini
+PROVIDER_KEY_VAR=GEMINI_API_KEY
+env_merge "$env"
+eq 'gemini: provider' "$(env_get "$env" AICC_PROVIDER)" gemini
+eq 'gemini: key' "$(env_get "$env" GEMINI_API_KEY)" sk-test
+
 # env_set on a value with a slash, an @ and an =.
 env_set "$env" X 'a/b@c=d'
 eq 'env_set keeps the value verbatim' "$(env_get "$env" X)" 'a/b@c=d'
@@ -276,7 +284,9 @@ eq 'env_set keeps the value verbatim' "$(env_get "$env" X)" 'a/b@c=d'
 # --------------------------------------------------------------- arguments ----
 
 eq 'parse_args: --provider=' "$(parse_args --provider=none --yes && echo "$PROVIDER_FLAG $ASSUME_YES")" 'none 1'
-notok 'parse_args: bad provider' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --provider gemini" 2>/dev/null
+eq 'parse_args: --provider gemini' "$(parse_args --provider gemini && echo "$PROVIDER_FLAG")" gemini
+eq 'provider_key_var: gemini' "$(provider_key_var gemini)" GEMINI_API_KEY
+notok 'parse_args: bad provider' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --provider bogus" 2>/dev/null
 notok 'parse_args: bad address' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --external-ip 1.2.3" 2>/dev/null
 notok 'parse_args: --purge alone' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --purge" 2>/dev/null
 
