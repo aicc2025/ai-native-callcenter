@@ -290,5 +290,41 @@ notok 'parse_args: bad provider' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'
 notok 'parse_args: bad address' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --external-ip 1.2.3" 2>/dev/null
 notok 'parse_args: --purge alone' sh -c "AICC_INSTALL_LIB=1; . '$here/install.sh'; parse_args --purge" 2>/dev/null
 
+# ---------------------------------------------------------------- output ----
+
+# The closing message: with demo data it names the seeded admin; without it,
+# it says how to create the first administrator instead of printing a password
+# that was never seeded.
+env="$TMP/output-no-demo.env"
+cat >"$env" <<'EOF'
+AICC_SEED=
+AICC_SEED_PASSWORD=secret
+HTTP_PORT=8080
+EOF
+ENV_FILE="$env"
+DIR=/tmp/aicc
+TAG=v0.0.0
+PROVIDER=none
+EXTERNAL_IP=192.0.2.1
+START=0
+FIRST_INSTALL=1
+final_output >"$TMP/output-no-demo.txt"
+ok 'final_output: no demo names the first-admin command' grep -q 'aicc useradd -username admin' "$TMP/output-no-demo.txt"
+notok 'final_output: no demo prints no seeded password' grep -q secret "$TMP/output-no-demo.txt"
+FIRST_INSTALL=0
+final_output >"$TMP/output-no-demo-rerun.txt"
+ok 'final_output: no demo rerun keeps the hint' grep -q 'aicc useradd -username admin' "$TMP/output-no-demo-rerun.txt"
+
+env="$TMP/output-demo.env"
+cat >"$env" <<'EOF'
+AICC_SEED=demo
+AICC_SEED_PASSWORD=secret
+HTTP_PORT=8080
+EOF
+ENV_FILE="$env"
+FIRST_INSTALL=1
+final_output >"$TMP/output-demo.txt"
+ok 'final_output: demo prints the admin password' grep -q 'admin / secret' "$TMP/output-demo.txt"
+
 printf '\n%d tests, %d failed\n' "$tests" "$failures"
 [ "$failures" = 0 ]

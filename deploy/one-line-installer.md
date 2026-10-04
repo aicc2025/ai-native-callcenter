@@ -65,16 +65,27 @@ extension, sign in as an agent and dial 95001 (English) or 95002 (Chinese).
 
 ## Sign in
 
-Open `http://<ip>:8080` and sign in as `admin`. The password is generated on
-the first install and kept in the install directory's `.env` as
-`AICC_SEED_PASSWORD` (`/opt/aicc/.env` on Linux, `~/.aicc/.env` on macOS);
-the first install prints it, a rerun only names that key. The demo agents
-(`amy`, `ben`, `wei`), `supervisor` and the seeded SIP extensions and customer
-numbers share that password.
+A default install seeds the demo dataset (`AICC_SEED=demo`), so it has an
+account to sign in with. Open `http://<ip>:8080` and sign in as `admin`; the
+password is generated with the other secrets on the first install and kept in
+the install directory's `.env` as `AICC_SEED_PASSWORD` (`/opt/aicc/.env` on
+Linux, `~/.aicc/.env` on macOS). The first install prints it, a rerun only
+names that key. The demo agents (`amy`, `ben`, `wei`), `supervisor` and the
+seeded SIP extensions and customer numbers share that password.
 
 ```sh
 grep AICC_SEED_PASSWORD /opt/aicc/.env    # Linux
 grep AICC_SEED_PASSWORD ~/.aicc/.env      # macOS
+```
+
+The seed never overwrites an account that exists, so a password changed in the
+app stays changed; `.env` keeps the value the seed first used.
+
+An install made with `--no-demo` seeds no accounts. Create the first
+administrator inside the application container (`cd ~/.aicc` on macOS):
+
+```sh
+cd /opt/aicc && docker compose exec aicc aicc useradd -username admin -password '<password>' -role ADMIN
 ```
 
 ## Supported platforms

@@ -81,9 +81,9 @@ Usage: install.sh [options]
   -h, --help          this text
 
 The provider key comes from the environment (OPENAI_API_KEY, ALIYUN_API_KEY
-for qwen, REALTIME_API_KEY for gateway, which also needs
-AICC_PROVIDER_ENDPOINT, DOUBAO_API_KEY, GEMINI_API_KEY) or a prompt. With
-sudo, keep it with `sudo -E`.
+for qwen, DOUBAO_API_KEY, GEMINI_API_KEY, REALTIME_API_KEY for gateway, which
+also needs AICC_PROVIDER_ENDPOINT) or a prompt. With sudo, keep it with
+`sudo -E`.
 
 Installs into /opt/aicc on Linux (as root) and ~/.aicc on macOS (not as root).
 EOF
@@ -1028,11 +1028,16 @@ final_output() {
     say "The call center is running."
     say ""
     say "  Web:        http://$EXTERNAL_IP:$(env_get "$ENV_FILE" HTTP_PORT | grep . || echo 8080)"
-    if [ "$FIRST_INSTALL" = 1 ]; then
-        say "  Sign in:    admin / $(env_get "$ENV_FILE" AICC_SEED_PASSWORD)"
-        say "              (also the password of the demo's agents; kept in $ENV_FILE)"
+    if [ "$(env_get "$ENV_FILE" AICC_SEED)" = demo ]; then
+        if [ "$FIRST_INSTALL" = 1 ]; then
+            say "  Sign in:    admin / $(env_get "$ENV_FILE" AICC_SEED_PASSWORD)"
+            say "              (also the password of the demo's agents; kept in $ENV_FILE)"
+        else
+            say "  Sign in:    admin; the password is AICC_SEED_PASSWORD in $ENV_FILE"
+        fi
     else
-        say "  Sign in:    admin; the password is AICC_SEED_PASSWORD in $ENV_FILE"
+        say "  Sign in:    no demo accounts were seeded; create the first one:"
+        say "              cd $DIR && docker compose exec aicc aicc useradd -username admin -password '<password>' -role ADMIN"
     fi
     say "  Phone:      install the browser phone, $EXTENSION_URL"
     say "              and add $EXTERNAL_IP in the extension's Allow Sites"

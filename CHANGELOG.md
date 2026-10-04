@@ -43,6 +43,9 @@ carries the one-line installer's files.
 
 ### Fixed
 
+- Deploy: with `--no-demo` the installer's closing message points at
+  `aicc useradd` for the first administrator instead of printing an admin
+  password that was never seeded.
 - Deploy: `aicc doctor --wait` gives the switch's `aicc_bot` gateway up to 45
   seconds to come back UP after the application is recreated. A provider
   change followed by a rerun could print `FAIL BOT_GATEWAY_DOWN` for a stack
